@@ -8,7 +8,7 @@ public enum HelperAuthorization {
         actualCDHash: String?,
         expectedCDHash: String?
     ) -> Bool {
-        guard identifier == "com.batterybar.app",
+        guard identifier == "com.batteryarchive.app",
               let actual = actualCDHash?.lowercased(),
               let expected = expectedCDHash?.lowercased(),
               !actual.isEmpty,

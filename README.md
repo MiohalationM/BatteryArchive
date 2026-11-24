@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Sources/BatteryBar/Resources/AppIcon.png" width="92" height="92" alt="BatteryArchive" />
+<img src="Sources/BatteryArchive/Resources/AppIcon.png" width="92" height="92" alt="BatteryArchive" />
 
 <h1>BatteryArchive</h1>
 
@@ -64,7 +64,7 @@
 
 - 在终端执行：
   ```bash
-  xattr -dr com.apple.quarantine /Applications/BatteryBar.app
+  xattr -dr com.apple.quarantine /Applications/BatteryArchive.app
   ```
 - 或先尝试打开一次，再前往 **系统设置 → 隐私与安全性** 底部点击 **仍要打开**。
 

@@ -30,9 +30,9 @@ jobs:
 
       - name: Verify packaged security boundaries
         run: |
-          codesign --verify --deep --strict .build/release/BatteryBar.app
-          codesign --verify --strict .build/release/BatteryBar.app/Contents/Resources/BatteryBarHelper
-          ! strings .build/release/BatteryBar.app/Contents/MacOS/BatteryBar | grep -q BATTERYBAR_HELPER_PATH
+          codesign --verify --deep --strict .build/release/BatteryArchive.app
+          codesign --verify --strict .build/release/BatteryArchive.app/Contents/Resources/BatteryArchiveHelper
+          ! strings .build/release/BatteryArchive.app/Contents/MacOS/BatteryArchive | grep -q BATTERYARCHIVE_HELPER_PATH
 
       - name: Run tests
         run: swift test
@@ -40,7 +40,7 @@ jobs:
       - name: Package artifact
         run: |
           cd .build/release
-          ditto -c -k --sequesterRsrc --keepParent BatteryBar.app BatteryArchive.zip
+          ditto -c -k --sequesterRsrc --keepParent BatteryArchive.app BatteryArchive.zip
 
       - name: Upload BatteryArchive
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

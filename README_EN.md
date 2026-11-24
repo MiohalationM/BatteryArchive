@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="Sources/BatteryBar/Resources/AppIcon.png" width="92" height="92" alt="BatteryArchive" />
+<img src="Sources/BatteryArchive/Resources/AppIcon.png" width="92" height="92" alt="BatteryArchive" />
 
 <h1>BatteryArchive</h1>
 
@@ -64,7 +64,7 @@ Because open-source builds are ad-hoc signed (not Apple notarized), macOS may wa
 
 - Run in Terminal:
   ```bash
-  xattr -dr com.apple.quarantine /Applications/BatteryBar.app
+  xattr -dr com.apple.quarantine /Applications/BatteryArchive.app
   ```
 - Or open the app once, then click **Open Anyway** at the bottom of **System Settings → Privacy & Security**.
 

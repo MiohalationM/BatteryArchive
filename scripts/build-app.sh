@@ -8,18 +8,18 @@ cd "$SCRIPT_DIR/.."
 # Helper 安装方式：使用 osascript + sudo（不走 SMJobBless），故主应用与 helper 的
 # Info.plist 不再包含 SMPrivilegedExecutables / SMAuthorizedClients。
 
-APP_NAME="BatteryBar"
+APP_NAME="BatteryArchive"
 PRODUCT_NAME="BatteryArchive"
-APP_VERSION="1.0.0"
-APP_BUILD="1"
+APP_VERSION="1.1.0"
+APP_BUILD="2"
 ICON_RESOURCE_NAME="BatteryArchiveIcon"
-HELPER_NAME="BatteryBarHelper"
+HELPER_NAME="BatteryArchiveHelper"
 # 分发使用 release 构建，确保空闲 CPU 占用最低
 BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
-BUNDLE_ID="com.batterybar.app"
-HELPER_BUNDLE_ID="com.batterybar.helper"
-ICON_DIR="Sources/BatteryBar/Resources"
+BUNDLE_ID="com.batteryarchive.app"
+HELPER_BUNDLE_ID="com.batteryarchive.helper"
+ICON_DIR="Sources/BatteryArchive/Resources"
 
 echo "=== 编译 $APP_NAME 和 $HELPER_NAME（release） ==="
 swift build -c release
@@ -32,13 +32,10 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# 复制主应用
+# 复制主应用与唯一图标资源（去重以减小 App 与 DMG 体积）
 cp "$BUILD_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/"
-cp "$ICON_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/"
 cp "$ICON_DIR/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/$ICON_RESOURCE_NAME.icns"
-cp "$ICON_DIR/AppIcon.png" "$APP_BUNDLE/Contents/Resources/"
 mkdir -p "$APP_BUNDLE/Contents/Resources/en.lproj" "$APP_BUNDLE/Contents/Resources/zh-Hans.lproj"
-# Finder 的本地化显示名称必须由 InfoPlist.strings 提供，保留内部 bundle 路径兼容。
 printf '%s\n' '"CFBundleName" = "BatteryArchive";' '"CFBundleDisplayName" = "BatteryArchive";' \
     > "$APP_BUNDLE/Contents/Resources/en.lproj/InfoPlist.strings"
 printf '%s\n' '"CFBundleName" = "BatteryArchive";' '"CFBundleDisplayName" = "BatteryArchive";' \
@@ -48,7 +45,7 @@ printf '%s\n' '"CFBundleName" = "BatteryArchive";' '"CFBundleDisplayName" = "Bat
 # Helper 暂存为 bundle（保留 Info.plist 和签名步骤），最终只把已签名的可执行文件
 # 放入 app bundle 的 Resources，供 Bundle.main.path(forResource:) 查找。
 # 运行时通过 osascript 安装到 /Library/PrivilegedHelperTools，不走 SMJobBless。
-HELPER_STAGING="$BUILD_DIR/BatteryBarHelper.bundle"
+HELPER_STAGING="$BUILD_DIR/BatteryArchiveHelper.bundle"
 rm -rf "$HELPER_STAGING"
 mkdir -p "$HELPER_STAGING/Contents/MacOS"
 cp "$BUILD_DIR/$HELPER_NAME" "$HELPER_STAGING/Contents/MacOS/"
@@ -159,7 +156,7 @@ ENTITLEMENTS
 # 携带只为本地调试保留的 helper 路径覆盖入口。
 codesign --verify --deep --strict "$APP_BUNDLE"
 codesign --verify --strict "$APP_BUNDLE/Contents/Resources/$HELPER_NAME"
-if strings "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | grep -q 'BATTERYBAR_HELPER_PATH'; then
+if strings "$APP_BUNDLE/Contents/MacOS/$APP_NAME" | grep -q 'BATTERYARCHIVE_HELPER_PATH'; then
     echo "ERROR: release binary contains debug-only helper path override" >&2
     exit 1
 fi

@@ -8,7 +8,7 @@ cd "$SCRIPT_DIR/.."
 # 始终复用 scripts/build-app.sh 的签名 App + Helper，避免 DMG 脚本产生未签名或残留旧 Helper
 # 的第二套产物。支持通过第一个参数自定义输出文件名（默认 BatteryArchive.dmg）。
 
-APP_NAME="BatteryBar"
+APP_NAME="BatteryArchive"
 BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 DMG_NAME="${1:-BatteryArchive.dmg}"

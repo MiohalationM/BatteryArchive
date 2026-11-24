@@ -51,9 +51,9 @@ jobs:
 
       - name: Verify packaged security boundaries
         run: |
-          codesign --verify --deep --strict .build/release/BatteryBar.app
-          codesign --verify --strict .build/release/BatteryBar.app/Contents/Resources/BatteryBarHelper
-          ! strings .build/release/BatteryBar.app/Contents/MacOS/BatteryBar | grep -q BATTERYBAR_HELPER_PATH
+          codesign --verify --deep --strict .build/release/BatteryArchive.app
+          codesign --verify --strict .build/release/BatteryArchive.app/Contents/Resources/BatteryArchiveHelper
+          ! strings .build/release/BatteryArchive.app/Contents/MacOS/BatteryArchive | grep -q BATTERYARCHIVE_HELPER_PATH
 
       - name: Generate SHA-256 checksums
         run: |
@@ -75,7 +75,7 @@ jobs:
           1. 下载 \`${DMG_FILE}\` 并打开镜像，将 **BatteryArchive** 拖入 \`Applications\` 文件夹。
           2. 由于开源版本采用本地 ad-hoc 签名（未经 Apple 公证），首次打开如遇 Gatekeeper 提示，请运行：
              \`\`\`bash
-             xattr -dr com.apple.quarantine /Applications/BatteryBar.app
+             xattr -dr com.apple.quarantine /Applications/BatteryArchive.app
              \`\`\`
              或在「系统设置 → 隐私与安全性」底部点击「仍要打开」。
 

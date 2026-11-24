@@ -2,7 +2,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "BatteryBar",
+    name: "BatteryArchive",
     platforms: [.macOS(.v14)],
     targets: [
         // App 与特权 Helper 共用的纯解析/归一化逻辑，保持协议两端口径一致并可单测。
@@ -13,9 +13,9 @@ let package = Package(
         ),
         // 主应用
         .executableTarget(
-            name: "BatteryBar",
+            name: "BatteryArchive",
             dependencies: ["TelemetryCore"],
-            path: "Sources/BatteryBar",
+            path: "Sources/BatteryArchive",
             resources: [
                 .copy("Resources/AppIcon.png"),
                 .copy("Resources/AppIcon.icns"),
@@ -31,15 +31,15 @@ let package = Package(
         ),
         // 可选按需特权分项采样 Helper
         .executableTarget(
-            name: "BatteryBarHelper",
+            name: "BatteryArchiveHelper",
             dependencies: ["TelemetryCore"],
-            path: "Sources/BatteryBarHelper"
+            path: "Sources/BatteryArchiveHelper"
         ),
         // 单元测试
         .testTarget(
-            name: "BatteryBarTests",
-            dependencies: ["BatteryBar", "TelemetryCore"],
-            path: "Tests/BatteryBarTests"
+            name: "BatteryArchiveTests",
+            dependencies: ["BatteryArchive", "TelemetryCore"],
+            path: "Tests/BatteryArchiveTests"
         ),
     ]
 )

@@ -8,9 +8,9 @@ cd "$SCRIPT_DIR/.."
 # 安全更新流程：先编译并严格验签，再优雅关闭运行中的应用、备份替换并验签；
 # 若复制或安装后验签失败，自动回滚至原安装版并重新启动。
 
-APP_NAME="BatteryBar"
-BUNDLE_ID="com.batterybar.app"
-INSTALL_ROOT="${BATTERYBAR_INSTALL_DIR:-$HOME/Applications}"
+APP_NAME="BatteryArchive"
+BUNDLE_ID="com.batteryarchive.app"
+INSTALL_ROOT="${BATTERYARCHIVE_INSTALL_DIR:-$HOME/Applications}"
 APP_PATH="$INSTALL_ROOT/$APP_NAME.app"
 BUILD_DIR=".build/release"
 APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"

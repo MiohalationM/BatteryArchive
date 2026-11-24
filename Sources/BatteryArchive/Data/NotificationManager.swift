@@ -1,0 +1,451 @@
+import Foundation
+import UserNotifications
+import os
+
+private let notifLogger = Logger(subsystem: "com.batteryarchive", category: "Notification")
+
+/// 系统通知授权状态（UNAuthorizationStatus 的领域映射）
+enum NotificationAuthorization: Equatable, Sendable {
+    case notDetermined
+    case denied
+    case authorized
+    case provisional
+    case ephemeral
+
+    init(_ status: UNAuthorizationStatus) {
+        switch status {
+        case .notDetermined: self = .notDetermined
+        case .denied: self = .denied
+        case .authorized: self = .authorized
+        case .provisional: self = .provisional
+        case .ephemeral: self = .ephemeral
+        @unknown default: self = .notDetermined
+        }
+    }
+}
+
+/// 系统通知授权边界（可注入；测试用 stub，绝不请求真实权限）。
+protocol NotificationAuthorizing: Sendable {
+    func currentAuthorization() async -> NotificationAuthorization
+    func requestAuthorization() async -> Bool
+}
+
+/// 系统通知投递边界（可注入；默认封装 UNUserNotificationCenter.add，测试用 stub 隔离系统通知中心）。
+typealias NotificationDeliverer = @MainActor @Sendable (UNNotificationRequest) async -> Bool
+
+struct SystemNotificationAuthorizer: NotificationAuthorizing {
+    func currentAuthorization() async -> NotificationAuthorization {
+        await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().getNotificationSettings { settings in
+                let state = NotificationAuthorization(settings.authorizationStatus)
+                continuation.resume(returning: state)
+            }
+        }
+    }
+
+    func requestAuthorization() async -> Bool {
+        await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, error in
+                if let error {
+                    notifLogger.error("Notification permission error: \(error.localizedDescription)")
+                }
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+}
+
+/// 通知投递展示策略（独立 NSObject 承担 UNUserNotificationCenterDelegate）。
+/// 与 @Observable 模型分离：NotificationManager 保持纯 Swift 类，
+/// 避免 NSObject runtime 与 Observation registrar 相互干扰。
+private final class SystemNotificationCenterDelegate: NSObject, UNUserNotificationCenterDelegate {
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .sound])
+    }
+}
+
+/// 通知管理器。
+///
+/// 权限与触发策略语义：
+/// - 启动、创建本管理器、读取电量都不请求通知权限；
+/// - 只有用户在设置页主动开启某个提醒开关且授权状态为 notDetermined 时才请求；
+/// - 首次初始化按授权状态推导默认开关：authorized/provisional 视为旧用户两开关均开；
+///   notDetermined/denied 两开关均关；并写入版本化 initialized 标记，之后不覆盖用户选择；
+/// - 授权 denied 时开关恢复真实关闭状态并给出原因与系统设置入口；
+/// - 低电量/充电目标的触发门槛与冷却窗口由 NotificationPolicy（纯逻辑）裁决，
+///   冷却时间戳持久化到 UserDefaults，BA 重启后依然有效。
+@MainActor
+@Observable
+final class NotificationManager {
+    static let shared = NotificationManager()
+
+    private enum Key {
+        /// 版本化 initialized 标记：写入后不得再按授权状态推导默认值
+        static let initialized = "BatteryArchiveNotificationInitialized"
+        static let lowBattery = "BatteryArchiveNotifyLowBattery"
+        static let fullCharge = "BatteryArchiveNotifyFullCharge"
+        static let lastLowBattery = "BatteryArchiveLastLowBatteryNotifAt"
+        static let lastFullCharge = "BatteryArchiveLastFullChargeNotifAt"
+    }
+
+    /// 首个 initialized 版本；未来策略变更可提升版本做迁移
+    private static let initializedVersion = "1"
+
+    private let authorizer: any NotificationAuthorizing
+    private let defaults: UserDefaults
+    private let deliverer: NotificationDeliverer
+    /// 独立的通知展示 delegate；本身不持有可变状态
+    private let presentationDelegate = SystemNotificationCenterDelegate()
+    /// 被动查询以此判断结果是否已被更新的用户意图淘汰。
+    private var userIntentRevision: UInt64 = 0
+    /// 启动/激活可能连续发起只读查询；只有最后开始的一次可以应用结果。
+    private var authorizationReadRevision: UInt64 = 0
+    /// 两个开关分别维护代际；快速切换同一开关时，迟到结果不得复活旧值。
+    private var lowBatteryRevision: UInt64 = 0
+    private var fullChargeRevision: UInt64 = 0
+    /// 两个开关同时首次开启时共享同一次系统权限请求，避免重复弹窗。
+    private var permissionRequestTask: Task<NotificationAuthorization, Never>?
+    /// 分类在途投递守卫：避免异步投递尚未完成时，高频采样重复入队同一类提醒。
+    private var lowBatteryDeliveryInFlight = false
+    private var fullChargeDeliveryInFlight = false
+    private var lowBatteryDeliveryTask: Task<Void, Never>?
+    private var fullChargeDeliveryTask: Task<Void, Never>?
+
+    private(set) var authorizationState: NotificationAuthorization = .notDetermined
+
+    /// 低电量提醒开关（真实持久化状态）
+    private(set) var lowBatteryEnabled: Bool = false
+    /// 充电目标提醒开关（沿用既有持久化键）
+    private(set) var fullChargeEnabled: Bool = false
+    /// 开启失败/权限被拒时的简洁原因
+    private(set) var lastErrorMessage: String?
+
+    /// 通知权限当前是否有效（可作为触发门槛）
+    var permissionValid: Bool {
+        switch authorizationState {
+        case .authorized, .provisional, .ephemeral: return true
+        case .notDetermined, .denied: return false
+        }
+    }
+
+    /// 上次低电量通知时间（持久化冷却依据）
+    var lastLowBatteryNotificationAt: Date? {
+        defaults.object(forKey: Key.lastLowBattery) as? Date
+    }
+    /// 上次充电目标通知时间（持久化冷却依据）
+    var lastFullChargeNotificationAt: Date? {
+        defaults.object(forKey: Key.lastFullCharge) as? Date
+    }
+
+    init(
+        authorizer: any NotificationAuthorizing = SystemNotificationAuthorizer(),
+        defaults: UserDefaults = .standard,
+        deliverer: @escaping NotificationDeliverer = NotificationManager.systemDeliver
+    ) {
+        self.authorizer = authorizer
+        self.defaults = defaults
+        self.deliverer = deliverer
+        // 注意：这里绝不动 UNUserNotificationCenter——测试进程没有 app bundle，
+        // 调用 UNUserNotificationCenter.current() 会触发 NSInternalInconsistencyException。
+        // 系统 delegate 由生产入口显式调用 attachSystemPresentationDelegate() 附加。
+
+        // 已初始化的用户：读取持久化的用户选择，绝不主动请求权限
+        if defaults.object(forKey: Key.initialized) != nil {
+            lowBatteryEnabled = defaults.bool(forKey: Key.lowBattery)
+            fullChargeEnabled = defaults.bool(forKey: Key.fullCharge)
+        }
+    }
+
+    private static func systemDeliver(_ request: UNNotificationRequest) async -> Bool {
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              Bundle.main.bundleIdentifier != nil else {
+            notifLogger.info("Skip delivering notification outside .app bundle")
+            return false
+        }
+        return await withCheckedContinuation { continuation in
+            UNUserNotificationCenter.current().add(request) { error in
+                if let error {
+                    notifLogger.error("Notification add failed: \(error.localizedDescription)")
+                    continuation.resume(returning: false)
+                } else {
+                    continuation.resume(returning: true)
+                }
+            }
+        }
+    }
+
+    /// 生产环境专用：把通知展示策略附加到系统通知中心。
+    /// 只能在拥有合法 app bundle 的进程中调用（AppDelegate 启动入口）；
+    /// 测试环境调用会崩溃，因此测试绝不触碰本方法。
+    func attachSystemPresentationDelegate() {
+        guard Bundle.main.bundleURL.pathExtension == "app",
+              Bundle.main.bundleIdentifier != nil else {
+            notifLogger.info("Skip attaching UNUserNotificationCenter delegate outside .app bundle")
+            return
+        }
+        UNUserNotificationCenter.current().delegate = presentationDelegate
+    }
+
+    /// 启动时调用：只查询授权状态，绝不请求权限。
+    /// 首次初始化按授权状态推导默认开关并写入版本化标记；
+    /// 之后只刷新授权状态（denied 时把残留的开启选择恢复为真实关闭）。
+    func start() async {
+        guard defaults.object(forKey: Key.initialized) == nil else {
+            await refreshAuthorization()
+            return
+        }
+        // didBecomeActive 可能在首次查询期间再触发刷新。旧读取只重试，不得用过时
+        // 权限写初始化默认值；用户若已操作开关则 initialized 已冻结，直接退出。
+        while defaults.object(forKey: Key.initialized) == nil, !Task.isCancelled {
+            let userRevision = userIntentRevision
+            let readRevision = beginAuthorizationRead()
+            let state = await authorizer.currentAuthorization()
+            guard userRevision == userIntentRevision,
+                  defaults.object(forKey: Key.initialized) == nil
+            else { return }
+            guard readRevision == authorizationReadRevision else { continue }
+
+            authorizationState = state
+            // old user（已授权/临时授权）：维持旧行为，两开关默认开启
+            let legacy = state == .authorized || state == .provisional
+            lowBatteryEnabled = legacy
+            fullChargeEnabled = legacy
+            defaults.set(Self.initializedVersion, forKey: Key.initialized)
+            defaults.set(lowBatteryEnabled, forKey: Key.lowBattery)
+            defaults.set(fullChargeEnabled, forKey: Key.fullCharge)
+            notifLogger.info("Notification settings initialized, state=\(String(describing: state))")
+            return
+        }
+    }
+
+    /// 刷新授权状态：系统设置中用户权限变化后调用。
+    /// 授权被拒绝时把开关恢复为真实关闭状态，不假装已开启。
+    func refreshAuthorization() async {
+        let userRevision = userIntentRevision
+        let readRevision = beginAuthorizationRead()
+        let state = await authorizer.currentAuthorization()
+        // 用户操作期间的旧被动查询只能丢弃，不能把真实开关再次改回去。
+        guard userRevision == userIntentRevision,
+              readRevision == authorizationReadRevision
+        else { return }
+        applyAuthorizationState(state)
+    }
+
+    private func beginAuthorizationRead() -> UInt64 {
+        authorizationReadRevision &+= 1
+        return authorizationReadRevision
+    }
+
+    /// 应用真实授权状态。denied 必须同步关闭开关；有效权限清除旧错误。
+    private func applyAuthorizationState(_ state: NotificationAuthorization) {
+        authorizationState = state
+        if state == .denied {
+            if lowBatteryEnabled {
+                lowBatteryEnabled = false
+                defaults.set(false, forKey: Key.lowBattery)
+            }
+            if fullChargeEnabled {
+                fullChargeEnabled = false
+                defaults.set(false, forKey: Key.fullCharge)
+            }
+            lastErrorMessage = "系统通知权限已被拒绝，请在系统设置中允许后重试"
+        } else if permissionValid {
+            lastErrorMessage = nil
+        }
+    }
+
+    /// 用户主动切换低电量提醒。
+    /// 只有授权为 notDetermined 时才请求系统权限；请求被拒或已 denied 时开关保持关闭。
+    func setLowBatteryEnabled(_ on: Bool) async {
+        let revision = beginLowBatteryIntent()
+        lastErrorMessage = nil
+        guard on else {
+            applyLowBattery(false)
+            return
+        }
+
+        // 用户可能刚从系统设置返回；每次主动开启先读取真实状态，不信任缓存 denied。
+        let currentState = await authorizer.currentAuthorization()
+        guard revision == lowBatteryRevision else { return }
+        applyAuthorizationState(currentState)
+        switch currentState {
+        case .denied:
+            // 不假装已经开启：保持真实关闭并给出系统设置入口
+            applyLowBattery(false)
+            lastErrorMessage = "系统通知权限被拒绝，无法开启低电量提醒；请在系统设置中允许后重试"
+        case .notDetermined:
+            let finalState = await requestAuthorizationAndReadState()
+            guard revision == lowBatteryRevision else { return }
+            applyAuthorizationState(finalState)
+            if permissionValid {
+                applyLowBattery(true)
+            } else {
+                applyLowBattery(false)
+                lastErrorMessage = "未获得有效的系统通知权限，低电量提醒保持关闭"
+            }
+        default:
+            applyLowBattery(true)
+        }
+    }
+
+    /// 用户主动切换充电目标提醒。规则同 setLowBatteryEnabled。
+    func setFullChargeEnabled(_ on: Bool) async {
+        let revision = beginFullChargeIntent()
+        lastErrorMessage = nil
+        guard on else {
+            applyFullCharge(false)
+            return
+        }
+
+        let currentState = await authorizer.currentAuthorization()
+        guard revision == fullChargeRevision else { return }
+        applyAuthorizationState(currentState)
+        switch currentState {
+        case .denied:
+            applyFullCharge(false)
+            lastErrorMessage = "系统通知权限被拒绝，无法开启充电目标提醒；请在系统设置中允许后重试"
+        case .notDetermined:
+            let finalState = await requestAuthorizationAndReadState()
+            guard revision == fullChargeRevision else { return }
+            applyAuthorizationState(finalState)
+            if permissionValid {
+                applyFullCharge(true)
+            } else {
+                applyFullCharge(false)
+                lastErrorMessage = "未获得有效的系统通知权限，充电目标提醒保持关闭"
+            }
+        default:
+            applyFullCharge(true)
+        }
+    }
+
+    private func beginLowBatteryIntent() -> UInt64 {
+        userIntentRevision &+= 1
+        lowBatteryRevision &+= 1
+        markInitializedForUserIntent()
+        return lowBatteryRevision
+    }
+
+    private func beginFullChargeIntent() -> UInt64 {
+        userIntentRevision &+= 1
+        fullChargeRevision &+= 1
+        markInitializedForUserIntent()
+        return fullChargeRevision
+    }
+
+    /// 用户主动操作优先于尚未完成的首次兼容推导；先冻结当前两开关再改单项。
+    private func markInitializedForUserIntent() {
+        guard defaults.object(forKey: Key.initialized) == nil else { return }
+        defaults.set(Self.initializedVersion, forKey: Key.initialized)
+        defaults.set(lowBatteryEnabled, forKey: Key.lowBattery)
+        defaults.set(fullChargeEnabled, forKey: Key.fullCharge)
+    }
+
+    /// 系统权限请求只可能由用户主动开启路径调用；并发开启两个开关时共享同一任务。
+    private func requestAuthorizationAndReadState() async -> NotificationAuthorization {
+        if let permissionRequestTask {
+            return await permissionRequestTask.value
+        }
+        let authorizer = authorizer
+        let task = Task {
+            _ = await authorizer.requestAuthorization()
+            return await authorizer.currentAuthorization()
+        }
+        permissionRequestTask = task
+        let state = await task.value
+        permissionRequestTask = nil
+        return state
+    }
+
+    private func applyLowBattery(_ on: Bool) {
+        lowBatteryEnabled = on
+        defaults.set(on, forKey: Key.lowBattery)
+    }
+
+    private func applyFullCharge(_ on: Bool) {
+        fullChargeEnabled = on
+        defaults.set(on, forKey: Key.fullCharge)
+    }
+
+    /// 投递低电量通知；仅在系统确认投递成功后才持久化冷却时间戳（触发与否已由策略裁决）。
+    /// 异步投递进行中时忽略重复调用，避免高频采样重复入队。
+    func sendLowBattery(level: Double) {
+        guard !lowBatteryDeliveryInFlight else { return }
+        lowBatteryDeliveryInFlight = true
+        let request = makeRequest(
+            title: "电池电量低",
+            body: "电池电量剩余 \(BatteryLevelPresentation.percent(level))%，请连接充电器",
+            identifier: "low-battery",
+            category: "LOW_BATTERY"
+        )
+        let deliverer = deliverer
+        lowBatteryDeliveryTask = Task { @MainActor [weak self] in
+            let delivered = await deliverer(request)
+            guard let self else { return }
+            self.lowBatteryDeliveryInFlight = false
+            self.lowBatteryDeliveryTask = nil
+            if delivered {
+                self.recordLowBatteryNotificationSent(at: Date())
+            }
+        }
+    }
+
+    /// 投递目标通知；仅在系统确认投递成功后才持久化冷却时间戳。
+    /// 低于 100% 的上限不冒充满电；异步投递进行中时忽略重复调用。
+    func sendChargeTargetReached(level: Double, targetPercent: Int) {
+        guard !fullChargeDeliveryInFlight else { return }
+        fullChargeDeliveryInFlight = true
+        let title = targetPercent >= 100 ? "电池已充满" : "已达到充电目标"
+        let body = "已达到系统设定的 \(targetPercent)% 目标（当前 \(BatteryLevelPresentation.percent(level))%），可以拔掉充电器"
+        let request = makeRequest(
+            title: title,
+            body: body,
+            identifier: "full-charge",
+            category: "FULL_CHARGE"
+        )
+        let deliverer = deliverer
+        fullChargeDeliveryTask = Task { @MainActor [weak self] in
+            let delivered = await deliverer(request)
+            guard let self else { return }
+            self.fullChargeDeliveryInFlight = false
+            self.fullChargeDeliveryTask = nil
+            if delivered {
+                self.recordFullChargeNotificationSent(at: Date())
+            }
+        }
+    }
+
+    /// 测试钩子：等待在途异步通知投递完成，避免测试依赖 sleep。
+    func waitForPendingDeliveries() async {
+        await lowBatteryDeliveryTask?.value
+        await fullChargeDeliveryTask?.value
+    }
+
+    private func makeRequest(
+        title: String,
+        body: String,
+        identifier: String,
+        category: String
+    ) -> UNNotificationRequest {
+        let notification = UNMutableNotificationContent()
+        notification.title = title
+        notification.body = body
+        notification.sound = .default
+        notification.categoryIdentifier = category
+        return UNNotificationRequest(identifier: identifier, content: notification, trigger: nil)
+    }
+
+    /// 记录并持久化低电量冷却时间（间隔决策与投递两阶段，测试可通过该方法注入时间）。
+    func recordLowBatteryNotificationSent(at date: Date) {
+        defaults.set(date, forKey: Key.lastLowBattery)
+    }
+
+    /// 记录并持久化充满冷却时间。
+    func recordFullChargeNotificationSent(at date: Date) {
+        defaults.set(date, forKey: Key.lastFullCharge)
+    }
+}
