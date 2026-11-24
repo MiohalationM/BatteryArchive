@@ -1,0 +1,575 @@
+import Foundation
+
+/// 续航/充电估算结果。证据不足时调用方得到 nil（或带 failureReason 的失败态），
+/// 不得用机型经验表填补数字。
+struct EstimationResult: Equatable {
+    enum Basis: String, Equatable {
+        /// IOPowerSources 系统剩余时间（不透明值，独立展示，永不静默混算）
+        case systemReported
+        /// 历史电量斜率（Theil–Sen）
+        case historicalSlope
+        /// 电池功率证据（放电 Wh / 有效时长 ÷ 满充能量）
+        case batteryPower
+        /// 多路证据按置信度加权
+        case fused
+    }
+
+    /// 置信度 0...1；band 是它的离散展示映射
+    var confidence: Double
+    var basis: Basis
+    /// 剩余时间（小时）或充满时间（小时）
+    var valueHours: Double
+    /// 速率（%/h），续航为正放电速率，充电为正充电速率
+    var ratePercentPerHour: Double
+    /// 证据时长（秒）
+    var evidenceDuration: TimeInterval
+    /// 证据窗口覆盖率 0...1
+    var coverage: Double
+    var lowerHours: Double?
+    var upperHours: Double?
+    /// 充电估算目标；nil 表示系统目标不可用，不回退到 100%。
+    var goalPercent: Double? = nil
+    /// 失败原因仅在不可用时有意义
+    var failureReason: String?
+
+    var band: ConfidenceBand {
+        ConfidenceBand.of(confidence)
+    }
+}
+
+extension EstimationResult {
+    /// 结果来源的中文标注（UI 必须随估算一起展示）
+    var basisDisplayName: String {
+        switch basis {
+        case .systemReported: "系统估算"
+        case .historicalSlope: "历史趋势"
+        case .batteryPower: "功率估算"
+        case .fused: "综合估算"
+        }
+    }
+}
+
+enum ConfidenceBand: String, Equatable {
+    case low, medium, high
+
+    static func of(_ confidence: Double) -> ConfidenceBand {
+        if confidence >= 0.7 { return .high }
+        if confidence >= 0.4 { return .medium }
+        return .low
+    }
+
+    var displayName: String {
+        switch self {
+        case .high: "高"
+        case .medium: "中"
+        case .low: "低"
+        }
+    }
+}
+
+/// 运行时续航与充电估算（纯逻辑、时间注入、输入有界）。
+///
+/// 冻结口径：
+/// - 移除 machineBaselineDrainRate、默认 11.1V、固定 6W/9W 机型功耗与
+///   “证据不足仍给数字”的路径——证据不足必须返回“正在校准/数据不足”。
+/// - 历史百分比斜率：仅明确离电且来源明确的最近 60 分钟；跨度 ≥20 分钟、
+///   净下降 ≥2%、覆盖率 ≥0.7；对间隔 ≥5 分钟的点对取 (levelStart-levelEnd)/hours，
+///   Theil–Sen 中位斜率抗量化回跳与异常点；中位斜率 ≤0 不可用；
+///   historyConfidence = min(跨度/60min, 净下降/5%, 覆盖率) 裁到 0...1。
+/// - 电池功率证据：最近 15 分钟 batteryDischargeWh ÷ 有效时长；fullEnergyWh 仅在
+///   FullChargeCapacity 与合理电压均真实可用时按 capacityAh×voltageV 计算，
+///   禁止默认电压；合理性检查只用于拒绝坏数据，不静默夹值；
+///   当前电压只能提供中等置信度（上限 0.66）。
+/// - 融合：两路都有效时按各自 confidence 加权速率；速率相差 >2 倍时总置信度
+///   打 0.6 折并扩大区间；总置信度 <0.4 不显示 App 估算。
+/// - 充电估算：仅 isCharging 且 externalConnected；最近 30 分钟 Theil–Sen 正斜率，
+///   跨度 ≥5 分钟且净增长 ≥1%；>80% 因涓流/优化充电降置信度；暂停/满电保持/
+///   上限无正增长不显示；异常速率直接拒绝，不再用 3–80%/h 夹值制造结果。
+enum RuntimeEstimator {
+
+    /// 展示门槛（冻结）：最终 confidence 低于该值的结果一律返回 nil，
+    /// 内部证据可以低置信存在，但不得到达 UI。
+    static let minimumDisplayConfidence = 0.40
+    /// 两路速率差异超过该倍数视为互相矛盾
+    static let contradictionRatio = 2.0
+
+    /// 单路/融合出口统一执行展示门槛：低于门槛视为数据不足。
+    private static func gated(_ result: EstimationResult?) -> EstimationResult? {
+        guard let result, result.confidence >= minimumDisplayConfidence else { return nil }
+        return result
+    }
+
+    struct Inputs {
+        var now = Date()
+        var currentLevel: Double = 0
+        var isCharging = false
+        /// nil 视同来源未知（不显示任何估算）
+        var externalConnected: Bool?
+        /// 最近快照（调用方负责有界，建议 ≤120 条）
+        var snapshots: [BatterySnapshot] = []
+        /// 最近完成的分钟聚合，升序（调用方负责有界，建议 ≤120 个）
+        var minuteAggregates: [MinuteAggregate] = []
+        /// 实际满充容量 mAh；0 = 未知
+        var fullChargeCapacityMah: Int = 0
+        /// true = 满充容量由百分比反推估算，功率证据应用保守置信度折减
+        var fullChargeCapacityIsEstimated: Bool = false
+        /// 当前电压 mV；0 = 未知
+        var voltageMV: Double = 0
+        /// IOPS 系统剩余时间（分钟）；-1 = 不可用
+        var systemReportedMinutes: Int = -1
+        /// 当前可靠读取到的充电目标；nil = 未知，不得默认 100%。
+        var chargeTargetPercent: Double? = nil
+        /// A live state transition, sleep or failed read cuts both evidence paths.
+        var stateObservedSince: Date? = nil
+        /// 实时电池包充入功率（瓦特，正值）；充电早期尚无足够分钟聚合时作为实时功率回退。
+        var liveChargeWatts: Double? = nil
+    }
+
+    // MARK: - 离电续航
+
+    /// 离电续航估算。返回 nil = 数据不足（正在校准）。
+    /// systemReported 回退由 `systemReportedEstimate` 单独提供，调用方必须标注来源。
+    static func dischargeEstimate(_ input: Inputs) -> EstimationResult? {
+        guard input.externalConnected == false, !input.isCharging else { return nil }
+        guard input.currentLevel.isFinite, input.currentLevel > 0, input.currentLevel <= 100 else { return nil }
+
+        let slope = historicalSlopeEvidence(input)
+        let power = batteryPowerEvidence(input)
+
+        switch (slope, power) {
+        case let (.some(a), .some(b)):
+            let totalWeight = a.confidence + b.confidence
+            guard totalWeight > 0 else { return nil }
+            let fusedRate = (a.ratePercentPerHour * a.confidence + b.ratePercentPerHour * b.confidence) / totalWeight
+            guard fusedRate.isFinite, fusedRate > 0 else { return nil }
+            let minRate = min(a.ratePercentPerHour, b.ratePercentPerHour)
+            let maxRate = max(a.ratePercentPerHour, b.ratePercentPerHour)
+            let ratio = maxRate / max(1e-9, minRate)
+            let contradicted = ratio > contradictionRatio
+            // 两路独立证据一致时不应把高置信度往低置信度拉低；仅在速率矛盾（>2倍）时对均值施加 0.6 惩罚。
+            var confidence: Double = if contradicted {
+                ((a.confidence + b.confidence) / 2) * 0.6
+            } else {
+                max(a.confidence, b.confidence) + 0.15 * min(a.confidence, b.confidence)
+            }
+            confidence = min(1, confidence)
+            // 融合出口同样执行展示门槛：矛盾惩罚后低于门槛即数据不足
+            guard confidence >= minimumDisplayConfidence else { return nil }
+            // 用两路速率的乘性包络构造区间：始终满足 lowerHours <= valueHours <= upperHours，
+            // 避免 1 - spread 贴近 0 时出现双曲爆炸。
+            let margin = contradicted ? 0.35 : 0.15
+            let lowRate = max(1e-9, minRate / (1 + margin))
+            let highRate = maxRate * (1 + margin)
+            return EstimationResult(
+                confidence: confidence,
+                basis: .fused,
+                valueHours: input.currentLevel / fusedRate,
+                ratePercentPerHour: fusedRate,
+                evidenceDuration: max(a.evidenceDuration, b.evidenceDuration),
+                coverage: min(a.coverage, b.coverage),
+                lowerHours: max(0, input.currentLevel / highRate),
+                upperHours: input.currentLevel / lowRate,
+                failureReason: contradicted ? "两路证据差异较大" : nil
+            )
+        case let (.some(a), .none):
+            return gated(single(a, level: input.currentLevel))
+        case let (.none, .some(b)):
+            return gated(single(b, level: input.currentLevel))
+        case (.none, .none):
+            return nil
+        }
+    }
+
+    private static func single(_ evidence: EstimationResult, level: Double) -> EstimationResult? {
+        guard evidence.ratePercentPerHour > 0 else { return nil }
+        var result = evidence
+        result.valueHours = level / evidence.ratePercentPerHour
+        return result
+    }
+
+    /// A. 历史百分比斜率证据。rate 即 %/h；valueHours 由调用方按当前电量折算。
+    static func historicalSlopeEvidence(_ input: Inputs) -> EstimationResult? {
+        let windowStart = input.now.addingTimeInterval(-3600)
+        let points = contiguousPoints(input, since: windowStart, charging: false)
+        guard points.count >= 2,
+              let span = interval(points.first!.0, points.last!.0),
+              span >= 20 * 60
+        else { return nil }
+
+        let netDrop = points.first!.1 - points.last!.1
+        guard netDrop >= 2 else { return nil }
+
+        let coverage = coveredFraction(points: points, span: span)
+        guard coverage >= 0.7 else { return nil }
+
+        let slopes = pairwiseSlopes(points: points, minimumPairInterval: 5 * 60)
+        // 与充电/功率路径同规则：异常速率直接拒绝（不夹值）。SMC 重校准跳变
+        // （如两点间 48%→28%）产生的荒谬斜率不得进入续航计算。
+        guard let median = median(of: slopes), median > 0, median <= 100 else { return nil }
+
+        let confidence = clamp01(min(span / 3600, netDrop / 5, coverage))
+        return EstimationResult(
+            confidence: confidence,
+            basis: .historicalSlope,
+            valueHours: 0,                                      // 由融合/单路出口折算
+            ratePercentPerHour: median,
+            evidenceDuration: span,
+            coverage: coverage
+        )
+    }
+
+    /// B. 电池功率证据。使用最近 15 分钟聚合的放出能量与有效时长。
+    static func batteryPowerEvidence(_ input: Inputs) -> EstimationResult? {
+        let windowStart = input.now.addingTimeInterval(-15 * 60)
+        let cutoff = max(windowStart, input.stateObservedSince ?? .distantPast)
+        var dedupByWindow: [Date: MinuteAggregate] = [:]
+        for item in input.minuteAggregates
+        where item.windowStart >= cutoff && item.windowStart.addingTimeInterval(60) <= input.now {
+            if let existing = dedupByWindow[item.windowStart],
+               existing.batteryDischargeSeconds >= item.batteryDischargeSeconds {
+                continue
+            }
+            dedupByWindow[item.windowStart] = item
+        }
+        let candidates = dedupByWindow.values.sorted { $0.windowStart < $1.windowStart }
+        var recent: [MinuteAggregate] = []
+        var next = input.now
+        for item in candidates.reversed() {
+            let itemEnd = item.windowStart.addingTimeInterval(60)
+            if !recent.isEmpty, itemEnd > next { continue }
+            guard next.timeIntervalSince(itemEnd) <= 130,
+                  item.batteryChargeSeconds == 0, item.batteryDischargeSeconds > 0 else { break }
+            recent.append(item)
+            next = item.windowStart
+        }
+        guard !recent.isEmpty else { return nil }
+
+        let dischargeWh = recent.reduce(0) { $0 + $1.batteryDischargeWh }
+        let seconds = recent.reduce(0) { $0 + $1.batteryDischargeSeconds }
+        let coverage = clamp01(seconds / (15 * 60))
+        // 有效时长不足 10 分钟：证据太薄，宁可校准
+        guard seconds >= 600, dischargeWh > 0 else { return nil }
+        let averageWatts = dischargeWh * 3600 / seconds
+
+        // fullEnergyWh 仅当容量与合理电压均真实可用；禁止默认 11.1V
+        guard input.fullChargeCapacityMah > 0, input.voltageMV > 0 else { return nil }
+        let voltageV = input.voltageMV / 1000
+        // 合理性检查只用于拒绝坏数据，不夹成固定值
+        guard (8.0...20.0).contains(voltageV), (1000...30_000).contains(input.fullChargeCapacityMah) else { return nil }
+        let fullEnergyWh = Double(input.fullChargeCapacityMah) / 1000 * voltageV
+        guard fullEnergyWh > 10 else { return nil }
+
+        let rate = averageWatts * 100 / fullEnergyWh
+        // 异常直接拒绝（不是夹到“合理区间”）
+        guard rate > 0, rate < 100 else { return nil }
+
+        // 当前电压瞬时值只能提供中等置信度（≤0.66）；反推估算容量再保守折减
+        var confidence = min(0.66, 0.33 + 0.33 * coverage)
+        if input.fullChargeCapacityIsEstimated {
+            confidence *= 0.85
+        }
+        return EstimationResult(
+            confidence: confidence,
+            basis: .batteryPower,
+            valueHours: 0,
+            ratePercentPerHour: rate,
+            evidenceDuration: seconds,
+            coverage: coverage
+        )
+    }
+
+    /// IOPowerSources 的系统剩余时间：独立证据，永不与 App 证据静默混算。
+    static func systemReportedEstimate(_ input: Inputs) -> EstimationResult? {
+        guard input.externalConnected == false,
+              !input.isCharging,
+              input.currentLevel.isFinite, input.currentLevel > 0, input.currentLevel <= 100,
+              (1...(72 * 60)).contains(input.systemReportedMinutes)
+        else { return nil }
+        let hours = Double(input.systemReportedMinutes) / 60
+        return EstimationResult(
+            confidence: 0.3,
+            basis: .systemReported,
+            valueHours: hours,
+            ratePercentPerHour: input.currentLevel / hours,
+            evidenceDuration: 0,
+            coverage: 0,
+            failureReason: nil
+        )
+    }
+
+    // MARK: - 充电时间
+
+    /// 到配置目标（80/85/90/95/100%）的充电时间估算。
+    /// 优先使用历史电量斜率；早期样本不足或 80% 以上涓流斜率置信不足时，回退至电池充电功率 CC+CV 物理模型。
+    /// 返回 nil = 目标未知 / 数据不足 / 暂停 / 已达目标。
+    static func chargeEstimate(_ input: Inputs) -> EstimationResult? {
+        if let slope = historicalChargeSlopeEvidence(input) {
+            return slope
+        }
+        return chargePowerEvidence(input)
+    }
+
+    private static func historicalChargeSlopeEvidence(_ input: Inputs) -> EstimationResult? {
+        guard input.externalConnected == true, input.isCharging else { return nil }
+        guard input.currentLevel.isFinite, (0...100).contains(input.currentLevel),
+              let goal = input.chargeTargetPercent,
+              goal.isFinite, goal > 0, goal <= 100,
+              input.currentLevel < goal else { return nil }
+
+        let windowStart = input.now.addingTimeInterval(-30 * 60)
+        let points = contiguousPoints(input, since: windowStart, charging: true)
+        guard points.count >= 2,
+              let span = interval(points.first!.0, points.last!.0),
+              span >= 5 * 60
+        else { return nil }
+
+        let gain = points.last!.1 - points.first!.1
+        guard gain >= 1 else { return nil }
+
+        // 充电是上升序列：direction -1 把成对斜率翻成正的充电速率
+        let slopes = pairwiseSlopes(points: points, minimumPairInterval: 5 * 60, direction: -1)
+        guard let median = median(of: slopes), median > 0 else { return nil }
+        // 异常速率直接拒绝，不做区间夹值
+        guard median <= 80 else { return nil }
+
+        let coverage = coveredFraction(points: points, span: span)
+        // 覆盖率直接参与 min（与放电侧同规则）：首尾仅两点的「睡眠充电」场景
+        // 覆盖率极低 → 置信度跌破展示门槛 → 正在校准，不再被 0.5 下限掩盖。
+        var confidence = clamp01(min(span / (30 * 60), gain / 5, coverage)) * 0.9
+        // 80% 以上涓流/优化充电阶段降低置信度
+        if input.currentLevel > 80 { confidence *= 0.6 }
+
+        return gated(EstimationResult(
+            confidence: clamp01(confidence),
+            basis: .historicalSlope,
+            valueHours: (goal - input.currentLevel) / median,
+            ratePercentPerHour: median,
+            evidenceDuration: span,
+            coverage: coverage,
+            goalPercent: goal,
+            failureReason: input.currentLevel > 80 ? "涓流/优化充电阶段" : nil
+        ))
+    }
+
+    /// 充电功率物理证据（支持 80/85/90/95/100% 全部上限）：
+    /// 80% 以下按恒流（CC）线性积分，80% 以上按锂电恒压（CV）线性降功率曲线精确对数积分。
+    static func chargePowerEvidence(_ input: Inputs) -> EstimationResult? {
+        guard input.externalConnected == true, input.isCharging else { return nil }
+        guard input.currentLevel.isFinite, (0...100).contains(input.currentLevel),
+              let goal = input.chargeTargetPercent,
+              goal.isFinite, goal > 0, goal <= 100,
+              input.currentLevel < goal
+        else { return nil }
+
+        guard (1000...30_000).contains(input.fullChargeCapacityMah),
+              input.voltageMV.isFinite, input.voltageMV > 0
+        else { return nil }
+        let voltageV = input.voltageMV / 1000
+        guard (8.0...20.0).contains(voltageV) else { return nil }
+        let fullEnergyWh = Double(input.fullChargeCapacityMah) / 1000 * voltageV
+        guard fullEnergyWh > 10 else { return nil }
+
+        let windowStart = input.now.addingTimeInterval(-10 * 60)
+        let cutoff = max(windowStart, input.stateObservedSince ?? .distantPast)
+        var dedupByWindow: [Date: MinuteAggregate] = [:]
+        for item in input.minuteAggregates
+        where item.windowStart >= cutoff && item.windowStart.addingTimeInterval(60) <= input.now {
+            if let existing = dedupByWindow[item.windowStart],
+               existing.batteryChargeSeconds >= item.batteryChargeSeconds {
+                continue
+            }
+            dedupByWindow[item.windowStart] = item
+        }
+        let candidates = dedupByWindow.values.sorted { $0.windowStart < $1.windowStart }
+        var recent: [MinuteAggregate] = []
+        var next = input.now
+        for item in candidates.reversed() {
+            let itemEnd = item.windowStart.addingTimeInterval(60)
+            if !recent.isEmpty, itemEnd > next { continue }
+            guard next.timeIntervalSince(itemEnd) <= 130,
+                  item.batteryDischargeSeconds == 0,
+                  item.batteryChargeSeconds > 0,
+                  item.batteryChargeWh > 0
+            else { break }
+            recent.append(item)
+            next = item.windowStart
+        }
+
+        let aggregatedWh = recent.reduce(0) { $0 + $1.batteryChargeWh }
+        let aggregatedSeconds = recent.reduce(0) { $0 + $1.batteryChargeSeconds }
+
+        let chargeWatts: Double
+        let coverage: Double
+        var confidence: Double
+        let evidenceDuration: TimeInterval
+        if aggregatedSeconds >= 120, aggregatedWh > 0 {
+            chargeWatts = aggregatedWh * 3600 / aggregatedSeconds
+            coverage = clamp01(aggregatedSeconds / 600)
+            confidence = min(0.66, 0.50 + 0.16 * coverage)
+            evidenceDuration = aggregatedSeconds
+        } else if let live = input.liveChargeWatts, live.isFinite, live > 1.0, live < 250 {
+            chargeWatts = live
+            coverage = 0
+            confidence = 0.50
+            evidenceDuration = 0
+        } else {
+            return nil
+        }
+
+        guard chargeWatts.isFinite, chargeWatts > 1.0, chargeWatts < 250 else { return nil }
+        let rawRate = chargeWatts * 100 / fullEnergyWh
+        guard rawRate.isFinite, (0.5...120).contains(rawRate) else { return nil }
+
+        let k = 0.0325
+        func taperFactor(_ soc: Double) -> Double {
+            soc <= 80 ? 1.0 : max(0.35, 1.0 - k * (soc - 80))
+        }
+
+        let start = input.currentLevel
+        let pCC = chargeWatts / taperFactor(start)
+        let ccHours: Double
+        if start < 80 {
+            let ccEnd = min(goal, 80)
+            ccHours = (fullEnergyWh * (ccEnd - start) / 100.0) / pCC
+        } else {
+            ccHours = 0
+        }
+        let cvHours: Double
+        if goal > 80 {
+            let cvStart = max(start, 80)
+            cvHours = (fullEnergyWh / (100.0 * pCC)) * (1.0 / k) * log(taperFactor(cvStart) / taperFactor(goal))
+        } else {
+            cvHours = 0
+        }
+
+        let hours = ccHours + cvHours
+        guard hours.isFinite, hours > 0, hours <= 72 else { return nil }
+
+        if input.fullChargeCapacityIsEstimated {
+            confidence *= 0.90
+        }
+        if input.currentLevel > 80 {
+            confidence *= 0.92
+        }
+
+        return gated(EstimationResult(
+            confidence: clamp01(confidence),
+            basis: .batteryPower,
+            valueHours: hours,
+            ratePercentPerHour: (goal - input.currentLevel) / hours,
+            evidenceDuration: evidenceDuration,
+            coverage: coverage,
+            goalPercent: goal,
+            failureReason: input.currentLevel > 80 ? "涓流充电阶段" : nil
+        ))
+    }
+
+    /// IOPowerSources 系统充满剩余时间（独立证据，严格仅在目标为 100% 时启用，
+    /// 绝不把系统的 100% 充满时间冒充 80/85/90/95% 自定义上限倒计时）。
+    static func systemReportedChargeEstimate(_ input: Inputs) -> EstimationResult? {
+        guard input.externalConnected == true,
+              input.isCharging,
+              input.currentLevel.isFinite, (0...100).contains(input.currentLevel),
+              let goal = input.chargeTargetPercent,
+              goal.isFinite, goal >= 100, goal <= 100,
+              input.currentLevel < goal,
+              (1...(72 * 60)).contains(input.systemReportedMinutes)
+        else { return nil }
+        let hours = Double(input.systemReportedMinutes) / 60
+        return EstimationResult(
+            confidence: 0.3,
+            basis: .systemReported,
+            valueHours: hours,
+            ratePercentPerHour: (goal - input.currentLevel) / hours,
+            evidenceDuration: 0,
+            coverage: 0,
+            goalPercent: goal,
+            failureReason: nil
+        )
+    }
+
+    // MARK: - 纯函数工具
+
+    private static func contiguousPoints(_ input: Inputs, since start: Date, charging: Bool) -> [(Date, Double)] {
+        let cutoff = max(start, input.stateObservedSince ?? .distantPast)
+        let ordered = input.snapshots
+            .filter { $0.timestamp >= cutoff && $0.timestamp <= input.now }
+            .sorted { $0.timestamp < $1.timestamp }
+        var result: [(Date, Double)] = []
+        var next = input.now
+        for point in ordered.reversed() {
+            // Do not filter away state changes before finding the current episode.
+            guard point.externalConnected == charging, point.isCharging == charging,
+                  point.level.isFinite, (0...100).contains(point.level),
+                  next.timeIntervalSince(point.timestamp) <= 130 else { break }
+            result.append((point.timestamp, point.level))
+            next = point.timestamp
+        }
+        return result.reversed()
+    }
+
+    /// Theil–Sen 成对斜率的分布摘要（%/h）。仅统计间隔 ≥ minimumPairInterval 的点对。
+    /// direction=1 用于下降序列（放电速率），-1 用于上升序列（充电速率）。
+    static func pairwiseSlopes(
+        points: [(Date, Double)],
+        minimumPairInterval: TimeInterval,
+        direction: Double = 1
+    ) -> [Double] {
+        var slopes: [Double] = []
+        for i in 0..<points.count {
+            for j in (i + 1)..<points.count {
+                guard let dt = interval(points[i].0, points[j].0), dt >= minimumPairInterval else { continue }
+                slopes.append(direction * (points[i].1 - points[j].1) / (dt / 3600))
+            }
+        }
+        return slopes
+    }
+
+    /// 中位数；空集返回 nil
+    static func median(of values: [Double]) -> Double? {
+        let sorted = values.filter(\.isFinite).sorted()
+        guard !sorted.isEmpty else { return nil }
+        let middle = sorted.count / 2
+        if sorted.count % 2 == 0 {
+            return (sorted[middle - 1] + sorted[middle]) / 2
+        }
+        return sorted[middle]
+    }
+
+    /// 点序列的时间覆盖：并集([t, min(t+65s, t_last))) / 总跨度。量化电量点之间的常规采样间隔
+    /// 计入覆盖，长缺口如实拉低，且不将末点之后超出跨度的 65 秒计为覆盖。
+    static func coveredFraction(points: [(Date, Double)], span: TimeInterval) -> Double {
+        guard span > 0, !points.isEmpty else { return 0 }
+        let grain: TimeInterval = 65
+        var intervals: [(Double, Double)] = points.map {
+            ($0.0.timeIntervalSince1970, $0.0.timeIntervalSince1970 + grain)
+        }
+        intervals.sort { $0.0 < $1.0 }
+        guard let lastTime = intervals.last?.0 else { return 0 }
+        var covered = 0.0
+        var currentStart = intervals[0].0
+        var currentEnd = min(intervals[0].1, lastTime)
+        for next in intervals.dropFirst() {
+            let nextStart = next.0
+            let nextEnd = min(next.1, lastTime)
+            if nextStart <= currentEnd {
+                currentEnd = max(currentEnd, nextEnd)
+            } else {
+                covered += max(0, currentEnd - currentStart)
+                currentStart = nextStart
+                currentEnd = nextEnd
+            }
+        }
+        covered += max(0, currentEnd - currentStart)
+        return clamp01(covered / span)
+    }
+
+    private static func interval(_ a: Date, _ b: Date) -> TimeInterval? {
+        let dt = b.timeIntervalSince(a)
+        return dt > 0 ? dt : nil
+    }
+
+    private static func clamp01(_ value: Double) -> Double {
+        min(1, max(0, value))
+    }
+}

@@ -1,0 +1,50 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - 'docs/**'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Select Xcode
+        run: |
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s /Applications/Xcode.app || true
+          xcodebuild -version
+          swift --version
+
+      - name: Build app + helper
+        run: bash scripts/build-app.sh
+
+      - name: Verify packaged security boundaries
+        run: |
+          codesign --verify --deep --strict .build/release/BatteryBar.app
+          codesign --verify --strict .build/release/BatteryBar.app/Contents/Resources/BatteryBarHelper
+          ! strings .build/release/BatteryBar.app/Contents/MacOS/BatteryBar | grep -q BATTERYBAR_HELPER_PATH
+
+      - name: Run tests
+        run: swift test
+
+      - name: Package artifact
+        run: |
+          cd .build/release
+          ditto -c -k --sequesterRsrc --keepParent BatteryBar.app BatteryArchive.zip
+
+      - name: Upload BatteryArchive
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: BatteryArchive
+          path: .build/release/BatteryArchive.zip
+          retention-days: 30

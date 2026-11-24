@@ -1,0 +1,96 @@
+name: Release DMG
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.0.0); defaults to current ref name'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          TAG="${INPUT_TAG:-$REF_NAME}"
+          if [[ ! "$TAG" =~ ^v[0-9A-Za-z._-]+$ ]]; then
+            echo "ERROR: Invalid release tag '$TAG' (expected format like v1.0.0)" >&2
+            exit 1
+          fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+          echo "DMG_FILE=BatteryArchive-${TAG}.dmg" >> "$GITHUB_ENV"
+
+      - name: Select Xcode
+        run: |
+          ls /Applications | grep -i xcode || true
+          sudo xcode-select -s /Applications/Xcode.app || true
+          xcodebuild -version
+          swift --version
+
+      - name: Run tests
+        run: swift test
+
+      - name: Build and verify signed DMG
+        run: bash scripts/build-dmg.sh "$DMG_FILE"
+
+      - name: Verify packaged security boundaries
+        run: |
+          codesign --verify --deep --strict .build/release/BatteryBar.app
+          codesign --verify --strict .build/release/BatteryBar.app/Contents/Resources/BatteryBarHelper
+          ! strings .build/release/BatteryBar.app/Contents/MacOS/BatteryBar | grep -q BATTERYBAR_HELPER_PATH
+
+      - name: Generate SHA-256 checksums
+        run: |
+          shasum -a 256 "$DMG_FILE" > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          SHA_LINE="$(cat SHA256SUMS.txt)"
+          cat > RELEASE_NOTES.md <<EOF
+          ## BatteryArchive ${RELEASE_TAG}
+
+          Native macOS 14.0+ menu-bar battery health, usage, and power monitor — 100% local, zero telemetry.
+
+          ### 安装 / Installation
+
+          1. 下载 \`${DMG_FILE}\` 并打开镜像，将 **BatteryArchive** 拖入 \`Applications\` 文件夹。
+          2. 由于开源版本采用本地 ad-hoc 签名（未经 Apple 公证），首次打开如遇 Gatekeeper 提示，请运行：
+             \`\`\`bash
+             xattr -dr com.apple.quarantine /Applications/BatteryBar.app
+             \`\`\`
+             或在「系统设置 → 隐私与安全性」底部点击「仍要打开」。
+
+          ### 校验和 / SHA-256
+
+          \`\`\`text
+          ${SHA_LINE}
+          \`\`\`
+          EOF
+
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "$DMG_FILE" SHA256SUMS.txt --clobber
+          else
+            gh release create "$RELEASE_TAG" "$DMG_FILE" SHA256SUMS.txt \
+              --title "BatteryArchive ${RELEASE_TAG}" \
+              --notes-file RELEASE_NOTES.md \
+              --generate-notes
+          fi
