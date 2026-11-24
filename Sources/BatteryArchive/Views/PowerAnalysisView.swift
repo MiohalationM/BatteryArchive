@@ -892,7 +892,7 @@ struct AdvancedSamplingCard: View {
                             await sampler.setAdvancedSamplingEnabled(true)
                         }
                     }
-                    .adaptiveGlassButton()
+                    .adaptiveGlassButton(tint: .red)
                     .controlSize(.small)
                 }
                 .foregroundStyle(.red)
@@ -909,30 +909,38 @@ struct AdvancedSamplingCard: View {
                 Divider().opacity(0.4)
 
                 HStack(spacing: 8) {
-                    Circle().fill(helperStatusTint(state)).frame(width: 6, height: 6)
                     Text("辅助服务状态")
-                        .font(BBType.caption)
+                        .font(BBType.captionMedium)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    Text(state.label)
-                        .font(.system(size: 11.5, weight: .semibold, design: .rounded).monospacedDigit())
-                        .foregroundStyle(Color.bbInk)
+                    StatusPillBadge(text: state.label, tint: helperStatusTint(state), showDot: true)
                 }
 
-                HStack(spacing: 8) {
-                    Image(systemName: "trash.fill")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.red)
-                    Text("移除后需要管理员授权，再次开启高级采样时将重新安装")
-                        .font(BBType.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                    Button("移除辅助服务…") { confirmRemoveHelper = true }
-                        .adaptiveGlassButton()
-                        .controlSize(.small)
-                        .disabled(sampler.isHelperBusy || !sampler.isHelperInstalled)
+                HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("后台辅助服务")
+                            .font(BBType.captionMedium)
+                            .foregroundStyle(Color.bbInk)
+                        Text("移除需管理员授权，再次开启高级采样时将重新安装")
+                            .font(BBType.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: 8)
+                    Button {
+                        confirmRemoveHelper = true
+                    } label: {
+                        HStack(spacing: 5) {
+                            Image(systemName: "trash")
+                                .font(.system(size: 10.5, weight: .semibold))
+                            Text("移除辅助服务…")
+                        }
+                    }
+                    .adaptiveGlassButton(tint: sampler.isHelperInstalled ? .red : nil)
+                    .controlSize(.small)
+                    .disabled(sampler.isHelperBusy || !sampler.isHelperInstalled)
                 }
+                .productWell(tint: sampler.isHelperInstalled ? .red : .secondary, padding: 10)
             }
         }
         .productCard(accent: stateTint(state))

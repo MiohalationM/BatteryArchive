@@ -95,7 +95,7 @@ struct SettingsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                         Spacer()
                         Button("打开系统设置") { loginItem.openApprovalSettings() }
-                            .adaptiveGlassButton()
+                            .adaptiveGlassButton(tint: .orange)
                             .controlSize(.small)
                     }
                     .foregroundStyle(.orange)
@@ -190,7 +190,7 @@ struct SettingsView: View {
             Spacer()
             if denied {
                 Button("打开系统设置") { openSystemNotificationSettings() }
-                    .adaptiveGlassButton()
+                    .adaptiveGlassButton(tint: .red)
                     .controlSize(.small)
             }
         }

@@ -608,13 +608,13 @@ import Testing
 
             VStack(alignment: .leading, spacing: 12) {
               HStack(spacing: 12) {
-                BrandSymbol(systemImage: "shield.slash", tint: .bbBlue, size: 32)
+                BrandSymbol(systemImage: "shield.checkered", tint: .bbMint, size: 32)
                 VStack(alignment: .leading, spacing: 2) {
                   Text("高级采样").font(BBType.cardTitle).foregroundStyle(Color.bbInk)
-                  Text("未开启 · 基础监控照常运行").font(BBType.caption).foregroundStyle(.secondary)
+                  Text("已开启 · 每 10 秒更新分项估算").font(BBType.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Toggle("", isOn: .constant(false)).labelsHidden().toggleStyle(.switch).controlSize(.small)
+                Toggle("", isOn: .constant(true)).labelsHidden().toggleStyle(.switch).controlSize(.small)
               }
               Text("开启后每 10 秒采样 CPU / GPU / 内存分项功耗（首次需管理员授权）；关闭后不运行后台服务，基础电量与记录照常工作。")
                 .font(BBType.caption)
@@ -622,20 +622,32 @@ import Testing
                 .fixedSize(horizontal: false, vertical: true)
               Divider().opacity(0.4)
               HStack(spacing: 8) {
-                Circle().fill(Color.secondary).frame(width: 6, height: 6)
-                Text("辅助服务状态").font(BBType.caption).foregroundStyle(.secondary)
+                Text("辅助服务状态").font(BBType.captionMedium).foregroundStyle(.secondary)
                 Spacer()
-                Text("已关闭").font(.system(size: 11.5, weight: .semibold, design: .rounded)).foregroundStyle(Color.bbInk)
+                StatusPillBadge(text: "已启用", tint: .bbMint, showDot: true)
               }
-              HStack(spacing: 8) {
-                Image(systemName: "trash.fill").font(.system(size: 11)).foregroundStyle(.red)
-                Text("移除后需要管理员授权，再次开启高级采样时将重新安装")
-                  .font(BBType.caption).foregroundStyle(.secondary)
-                Spacer()
-                Button("移除辅助服务…") {}.adaptiveGlassButton().controlSize(.small).disabled(true)
+              HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 2) {
+                  Text("后台辅助服务").font(BBType.captionMedium).foregroundStyle(Color.bbInk)
+                  Text("移除需管理员授权，再次开启高级采样时将重新安装")
+                    .font(BBType.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                Button {
+                } label: {
+                  HStack(spacing: 5) {
+                    Image(systemName: "trash").font(.system(size: 10.5, weight: .semibold))
+                    Text("移除辅助服务…")
+                  }
+                }
+                .adaptiveGlassButton(tint: .red)
+                .controlSize(.small)
               }
+              .productWell(tint: .red, padding: 10)
             }
-            .productCard(accent: .bbBlue)
+            .productCard(accent: .bbMint)
 
             VStack(alignment: .leading, spacing: 12) {
               SectionHeader(title: "本机数据", systemImage: "internaldrive.fill", tint: .bbTeal)

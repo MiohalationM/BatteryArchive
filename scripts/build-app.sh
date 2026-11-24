@@ -10,8 +10,8 @@ cd "$SCRIPT_DIR/.."
 
 APP_NAME="BatteryArchive"
 PRODUCT_NAME="BatteryArchive"
-APP_VERSION="1.1.0"
-APP_BUILD="2"
+APP_VERSION="1.1.1"
+APP_BUILD="3"
 ICON_RESOURCE_NAME="BatteryArchiveIcon"
 HELPER_NAME="BatteryArchiveHelper"
 # 分发使用 release 构建，确保空闲 CPU 占用最低

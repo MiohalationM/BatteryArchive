@@ -309,10 +309,10 @@ extension View {
             .productSurface(.well, tint: tint, cornerRadius: BBDesign.cornerRadiusSmall)
     }
 
-    /// 内容层标准次要按钮（Apple HIG：滚动内容与表单卡内使用标准 bordered，不使用 Liquid Glass）。
+    /// 内容层统一轻量次要胶囊按钮（与浮层及表单卡风格一致，提供柔光边框、悬停高亮与按压缩放）。
     @ViewBuilder
-    func adaptiveGlassButton() -> some View {
-        self.buttonStyle(.bordered)
+    func adaptiveGlassButton(tint: Color? = nil) -> some View {
+        self.buttonStyle(ProductSecondaryButtonStyle(capsule: true, accentTint: tint))
     }
 
     /// 浮层/控制栏轻量胶囊按钮（避免在 NSPopover 等原生玻璃容器内叠加 .glass 导致 Glass-on-Glass）。
