@@ -3,7 +3,7 @@ import Foundation
 /// 功耗页范围统计的纯函数（无 SwiftUI 依赖，可独立反例测试）。
 enum RangeStatistics {
 
-    /// 所选范围的总覆盖率。冻结口径：
+    /// 所选范围的总覆盖率计算规则：
     /// - 分母是用户选择范围的墙钟时长（rangeStart→rangeEnd），
     ///   不是现存聚合点数量；
     /// - 完全缺失的分钟计为未覆盖；

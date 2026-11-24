@@ -70,7 +70,7 @@ private final class SystemNotificationCenterDelegate: NSObject, UNUserNotificati
 
 /// 通知管理器。
 ///
-/// 权限与触发策略冻结语义：
+/// 权限与触发策略语义：
 /// - 启动、创建本管理器、读取电量都不请求通知权限；
 /// - 只有用户在设置页主动开启某个提醒开关且授权状态为 notDetermined 时才请求；
 /// - 首次初始化按授权状态推导默认开关：authorized/provisional 视为旧用户两开关均开；

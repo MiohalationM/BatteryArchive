@@ -414,7 +414,7 @@ private final class StubPolicyRunner: ChargePolicyCommandRunning, @unchecked Sen
         ))
     }
 
-    // MARK: - 10. 深度审计回归测试（融合置信度、分钟队列、边界电量、低温换算、损坏 Epoch 修复）
+    // MARK: - 10. 边界回归测试（融合置信度、分钟队列、边界电量、低温换算、损坏 Epoch 修复）
 
     @Test func agreeingFusedEvidenceNeverLowersConfidenceAndSystemEstimateRejectsSentinels() throws {
         var input = RuntimeEstimator.Inputs()
@@ -629,7 +629,7 @@ private final class StubPolicyRunner: ChargePolicyCommandRunning, @unchecked Sen
         #expect(abs(review.unrecordedSeconds - max(0, review.unknownSeconds - 120 - 55)) < 1e-9)
     }
 
-    // MARK: - 12. 独立审计可靠性加固回归
+    // MARK: - 12. 可靠性加固回归（时钟回拨、健康来源、读取缺口、日汇总恢复）
 
     @Test func monotonicClockResumesAggregatorsAfterOneHourWallClockRollback() throws {
         // 1) WindowTelemetryAggregator：单调时钟递增但墙钟回拨 1 小时后，必须立刻恢复分钟聚合，不卡死且不倒向积分

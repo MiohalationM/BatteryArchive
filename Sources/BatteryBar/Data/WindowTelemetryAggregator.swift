@@ -23,9 +23,9 @@ struct MinuteAggregate: Equatable {
     /// 窗口内净充入电池包的累计能量（Wh）；默认 0 保持既有构造调用兼容。
     var batteryChargeWh: Double = 0
 
-    /// UI 是否可把能耗当作完整分钟指标展示（冻结阈值：覆盖率 ≥ 0.8）。
+    /// UI 是否可把能耗当作完整分钟指标展示（覆盖率阈值 ≥ 0.8）。
     var hasFullSystemMetric: Bool { systemCoverage >= 0.8 }
-    /// 温度趋势是否允许连线（冻结阈值：覆盖率 ≥ 0.5）；最大值可保留但须附覆盖率。
+    /// 温度趋势是否允许连线（覆盖率阈值 ≥ 0.5）；最大值可保留但须附覆盖率。
     var hasUsableTemperatureTrend: Bool { temperatureCoverage >= 0.5 }
 }
 

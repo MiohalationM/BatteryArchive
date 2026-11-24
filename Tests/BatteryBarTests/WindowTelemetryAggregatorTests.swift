@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import BatteryBar
 
-/// 分钟聚合器反例（冻结口径）：
+/// 分钟聚合器测试：
 /// - 零阶保持积分，单样本最多保持 min(30s, 2×预期间隔)，缺口不外推；
 /// - 有效零瓦计入覆盖率，缺失不计入；
 /// - 充入/放出方向严格分开；来源未知排除；

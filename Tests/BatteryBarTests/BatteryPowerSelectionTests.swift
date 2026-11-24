@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import BatteryBar
 
-/// 电池包功率来源选择反例（冻结规则）：
+/// 电池包功率来源选择测试：
 /// 1. 高优先级 raw=0、低优先级正值 → 必须 0（0 立即胜出，不被覆盖）；
 /// 2. raw=0、V×I>0 → 必须 0 且非 estimated（V×I 兜底不得覆盖有效 0）；
 /// 3. 高优先级坏值、低优先级合法正值 → 取低优先级正值；

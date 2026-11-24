@@ -29,7 +29,7 @@ struct BatteryInfo: Equatable {
     var maxCapacityIsEstimated: Bool = false
 }
 
-/// 电池健康口径（冻结）：UI 首选 macOS system_profiler 报告的「最大容量」；
+/// 电池健康口径：UI 首选 macOS system_profiler 报告的「最大容量」；
 /// FullChargeCapacity÷DesignCapacity 仅作回退并标注「容量比估算」。
 /// percent==0 表示不可用——不默认 100，不用 StateOfCharge 冒充。
 struct BatteryHealthMetric: Equatable {

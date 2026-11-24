@@ -132,7 +132,7 @@ private final class DelayedChargePolicyRunner: ChargePolicyCommandRunning, @unch
         }
     }
 
-    /// 脱敏实机夹具：本机 2026-10-23 执行只读 `/usr/bin/pmset -g battlimit` 的输出。
+    /// 实机样例：只读 `/usr/bin/pmset -g battlimit` 的输出夹具。
     /// `chargeSocLimitOwner` 值分别独立脱敏；两个重复的 manualChargeLimit / 80 策略保留。
     private let liveDuplicateFixture = """
     Battery level limits:

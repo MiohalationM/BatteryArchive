@@ -86,7 +86,7 @@ struct SystemHelperLifecycleOps: HelperLifecycleOps {
 
 /// 高级采样「开关 → 安装/更新/卸载」状态机（@MainActor）。
 ///
-/// 冻结语义：
+/// 生命周期语义：
 /// - 开启只负责安装/更新成功后进入 enabled；安装失败、用户取消管理员授权或
 ///   XPC 错误时进入 error，调用方据此恢复真实关闭状态；
 /// - disable 只把状态置为 disabled，绝不卸载、绝不请求管理员密码；

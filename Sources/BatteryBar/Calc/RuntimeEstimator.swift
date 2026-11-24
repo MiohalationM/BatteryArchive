@@ -69,7 +69,7 @@ enum ConfidenceBand: String, Equatable {
 
 /// 运行时续航与充电估算（纯逻辑、时间注入、输入有界）。
 ///
-/// 冻结口径：
+/// 估算口径：
 /// - 移除 machineBaselineDrainRate、默认 11.1V、固定 6W/9W 机型功耗与
 ///   “证据不足仍给数字”的路径——证据不足必须返回“正在校准/数据不足”。
 /// - 历史百分比斜率：仅明确离电且来源明确的最近 60 分钟；跨度 ≥20 分钟、
@@ -87,7 +87,7 @@ enum ConfidenceBand: String, Equatable {
 ///   上限无正增长不显示；异常速率直接拒绝，不再用 3–80%/h 夹值制造结果。
 enum RuntimeEstimator {
 
-    /// 展示门槛（冻结）：最终 confidence 低于该值的结果一律返回 nil，
+    /// 展示门槛：最终 confidence 低于该值的结果一律返回 nil，
     /// 内部证据可以低置信存在，但不得到达 UI。
     static let minimumDisplayConfidence = 0.40
     /// 两路速率差异超过该倍数视为互相矛盾

@@ -16,6 +16,10 @@
 </p>
 
 <p>
+  <strong>简体中文</strong> · <a href="README_EN.md">English</a>
+</p>
+
+<p>
   <a href="../../releases/latest"><strong>下载 DMG</strong></a> ·
   <a href="#界面预览">界面预览</a> ·
   <a href="#功能">功能</a> ·

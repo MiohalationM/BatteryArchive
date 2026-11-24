@@ -13,7 +13,7 @@ import CoreGraphics
 /// 通过 Task.detached 移出主线程，结果回写主线程；休眠回调用 MainActor.assumeIsolated
 /// 同步执行，避免 willSleep 到系统入睡之间 Task 排队延迟导致睡眠统计丢失。
 ///
-/// 采样节奏（冻结策略，无用户可调刷新频率）：
+/// 固定采样节奏（无用户可调刷新频率）：
 /// - 任一读数界面可见：基础兜底读取每 5 秒；都不可见：每 15 秒；
 /// - 每次界面打开立即读取一次；
 /// - IOPowerSources 变化（电源增删/插拔）经 IOPSNotificationCreateRunLoopSource
@@ -91,7 +91,7 @@ final class PowerSampler {
     private(set) var currentLowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
     private(set) var currentThermalState = "正常"
     private(set) var currentInfo: BatteryInfo?
-    /// 健康口径（冻结）：UI 首选 macOS system_profiler 报告的「最大容量」；
+    /// 健康口径：UI 首选 macOS system_profiler 报告的「最大容量」；
     /// FullChargeCapacity÷DesignCapacity 仅作回退并标注「容量比估算」，
     /// 不冒充系统健康度。Popover 与主窗口消费同一模型。
     private(set) var healthMetric = BatteryHealthMetric()
@@ -705,7 +705,7 @@ final class PowerSampler {
             guard let self, self.isStarted else { return }
             // 瞬时失败（spawn 失败/解析失败）不得降级既有口径：只有拿到新的
             // 系统读数才覆盖；失败时保留旧值（含启动时的回退口径），
-            // TTL 到期后的下一次刷新自然重试。与「系统值永远优先」冻结规则一致。
+            // TTL 到期后的下一次刷新自然重试，保持「系统值永远优先」口径一致。
             guard let reading else { return }
             self.applySystemHealth(reading)
         }

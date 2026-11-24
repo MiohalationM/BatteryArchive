@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import BatteryBar
 
-/// 续航/充电估算反例（冻结口径）：
+/// 续航与充电估算测试：
 /// - Theil–Sen 中位斜率正确且抗电量回跳/异常点；
 /// - 跨度、下降、覆盖不足必须返回数据不足（nil）；
 /// - 接电与来源未知样本完全排除；

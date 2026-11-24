@@ -2,7 +2,7 @@ import Foundation
 
 /// 每日电池健康长期记录（永久本机保留，不随 30 天使用明细或 24 小时快照裁剪）。
 ///
-/// 口径约束（冻结）：
+/// 统计口径约束：
 /// - `systemHealthPercent` 只接受 macOS `system_profiler` 报告的官方「最大容量」，
 ///   绝不用 `FullChargeCapacity / DesignCapacity` 冒充；
 /// - `capacityRatioPercent` 仅作为独立的容量比参考计算属性提供；

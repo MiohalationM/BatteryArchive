@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import BatteryBar
 
-/// 范围统计纯函数反例（冻结口径）：
+/// 范围统计纯函数测试：
 /// - 总覆盖率分母 = 用户所选范围的墙钟时长，完全缺失的分钟计为未覆盖；
 /// - 按 aggregateWindowStart 去重并限制到所选窗口；
 /// - 能耗只累加覆盖达标分钟的 systemEnergyWh。

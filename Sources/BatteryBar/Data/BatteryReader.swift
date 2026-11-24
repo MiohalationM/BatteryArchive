@@ -39,7 +39,7 @@ final class BatteryReader: @unchecked Sendable {
             return powerSource.isPluggedIn
         }
 
-        /// 可信系统负载（与 BatterySnapshot.trustedSystemLoad 同一冻结规则）：
+        /// 可信系统负载（与 BatterySnapshot.trustedSystemLoad 同一规则）：
         /// 实测遥测独立可信；估算负载只在明确离电时可信。
         var trustedSystemLoad: Double? {
             guard let info = batteryInfo, info.systemPowerAvailable, info.systemPower > 0 else { return nil }
@@ -47,7 +47,7 @@ final class BatteryReader: @unchecked Sendable {
             return resolvedExternalConnected == false ? info.systemPower : nil
         }
 
-        /// 电池功率方向通道（冻结规则）：
+        /// 电池功率方向通道规则：
         /// 1. 接电且充电、功率可用 → charge；
         /// 2. 明确离电且未充电、功率可用 → discharge；
         /// 3. 接电未充电、状态自相矛盾（如离电却在充电）、来源未知或功率不可用 → unknown；
@@ -233,7 +233,7 @@ final class BatteryReader: @unchecked Sendable {
 
         // 电池包功率必须区分「可信的有效 0W」与「没有读到功率」，不得用普通
         // Double=0 同时表达两者。来源选择（优先级/0 立即胜出/坏值跳过/V×I 兜底）
-        // 见 BatteryPowerSelection（纯逻辑，冻结规则）。兼容哨兵 0 只允许进入
+        // 见 BatteryPowerSelection（纯逻辑选择规则）。兼容哨兵 0 只允许进入
         // BatterySnapshot 兼容字段，不得进入质量模型或分钟积分。
         let batteryPowerResult = BatteryPowerSelection.resolve(
             directCandidates: [
@@ -483,7 +483,7 @@ final class BatteryReader: @unchecked Sendable {
         }
     }
 
-    /// 运行子进程并捕获 stdout，带超时与管道死锁保护（冻结口径）：
+    /// 运行子进程并捕获 stdout，带超时与管道死锁保护：
     /// - 先并发读管道再等待退出——否则输出超过管道缓冲（64KB）时子进程
     ///   阻塞在 write、父进程死锁在 `waitUntilExit`；
     /// - 超时先 SIGTERM（宽限 2s）再 SIGKILL，防止 system_profiler 偶发挂起

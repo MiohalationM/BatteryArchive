@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import BatteryBar
 
-/// 电池功率方向通道冻结规则反例：
+/// 电池功率方向通道规则测试：
 /// 1. 接电+充电+功率可用 → charge；
 /// 2. 明确离电+未充电+功率可用 → discharge；
 /// 3. 接电未充电 / 矛盾状态（离电却在充电）/ 来源未知 / 功率不可用 → unknown；

@@ -4,7 +4,7 @@ import Testing
 
 @Suite struct SamplingCadenceTests {
     @Test func foregroundIsFixedFiveSecondsAndBackgroundFifteen() {
-        // 冻结策略：读数界面可见 5 秒兜底，不可见 15 秒保活；不存在用户可调间隔
+        // 固定策略：读数界面可见 5 秒兜底，不可见 15 秒保活；不存在用户可调间隔
         #expect(SamplingCadence.effectiveInterval(hasVisibleSurface: true) == 5)
         #expect(SamplingCadence.effectiveInterval(hasVisibleSurface: false) == 15)
         #expect(SamplingCadence.foregroundInterval == 5)
@@ -109,7 +109,7 @@ import Testing
         #expect(coalescer.eventReceived(now: t0.addingTimeInterval(1.0)) == .fireNow)
     }
 
-    /// 保持上限口径冻结：min(30 秒, 2×预期间隔)
+    /// 保持上限口径：min(30 秒, 2×预期间隔)
     @Test func holdLimitFormulaFrozen() {
         #expect(WindowTelemetryAggregator.holdLimit(forExpectedInterval: 5) == 10)
         #expect(WindowTelemetryAggregator.holdLimit(forExpectedInterval: 15) == 30)

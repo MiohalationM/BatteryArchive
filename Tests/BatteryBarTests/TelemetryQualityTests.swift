@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import BatteryBar
 
-/// 数据质量语义反例（冻结口径）：
+/// 数据质量语义测试：
 /// - 同值重复读取只变 readAt，changedAt 不变；
 /// - 值改变才更新 changedAt；
 /// - sourceSampleAt 仅 powermetrics 允许填写，IORegistry 类来源强制 nil；

@@ -469,7 +469,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     ///
     /// 宽度控制：button.attributedTitle + 固定 statusItem.length（NSAttributedString 精确测宽 + ceil + 2pt）。
     /// 不再用 NSTextField 子视图方案——macOS 27 上 NSTextField 嵌入 NSStatusBarButton
-    /// 会触发 AppKit 布局引擎持续重排，实测空转约 37% CPU（2026-08-22，见 T-30）。
+    /// 会触发 AppKit 布局引擎持续重排，造成明显的空闲 CPU 占用。
     private func refreshTitle() {
         let level = BatteryLevelPresentation.percent(sampler.currentLevel)
         let text = sampler.currentSourceKnown ? "\(level)%" : "—"
