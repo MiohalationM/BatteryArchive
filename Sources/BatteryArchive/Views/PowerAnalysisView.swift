@@ -193,7 +193,7 @@ struct PowerAnalysisView: View {
         )
 
         let (legacySnapshots, legacyStats) = computeLegacyStats(from: source, cutoff: cutoff, now: now)
-        let stats = computeAggregateStats(from: inRange) ?? legacyStats
+        let stats = computeAggregateStats(from: source, rangeStart: cutoff, rangeEnd: now) ?? legacyStats
 
         return PowerRangeComputed(
             loadPoints: loadPoints,
@@ -230,29 +230,23 @@ struct PowerAnalysisView: View {
         return ChartDownsampler.downsampleTrendPoints(points, maxPoints: 240)
     }
 
-    nonisolated private static func computeAggregateStats(from inRange: [BatterySnapshot]) -> PowerRangeStats? {
-        let usable = inRange.filter {
-            guard let cov = $0.systemCoverage, cov.isFinite, cov >= 0.8,
-                  let avg = $0.systemPowerAverage, avg.isFinite,
-                  let wh = $0.systemEnergyWh, wh.isFinite, wh >= 0 else { return false }
-            return true
-        }
-        guard !usable.isEmpty else { return nil }
-
-        let totalEnergy = usable.reduce(0) { $0 + ($1.systemEnergyWh ?? 0) }
-        let effectiveSeconds = usable.reduce(0.0) { $0 + min(1, max(0, $1.systemCoverage ?? 0)) * 60 }
-        let effectiveHours = effectiveSeconds / 3600
-        guard effectiveHours > 0 else { return nil }
-        let average = totalEnergy / effectiveHours
-        let peak = usable.compactMap(\.systemPowerPeak).filter(\.isFinite).max() ?? 0
-        let low = usable.compactMap(\.systemPowerAverage).filter(\.isFinite).min()
+    nonisolated private static func computeAggregateStats(
+        from source: [BatterySnapshot],
+        rangeStart: Date,
+        rangeEnd: Date
+    ) -> PowerRangeStats? {
+        guard let summary = RangeStatistics.systemPowerSummary(
+            snapshots: source,
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd
+        ) else { return nil }
 
         return PowerRangeStats(
-            average: average,
-            peak: max(peak, average),
-            low: low,
-            sampleCount: usable.count,
-            coverage: effectiveSeconds
+            average: summary.averageWatts,
+            peak: summary.peakWatts,
+            low: summary.lowWatts,
+            sampleCount: summary.usableMinuteCount,
+            coverage: summary.effectiveSeconds
         )
     }
 
@@ -911,6 +905,14 @@ struct AdvancedSamplingCard: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             if showRemovalControl {
+                let hasLegacy = sampler.hasLegacyHelperInstalled
+                let statusBadgeText: String = if hasLegacy {
+                    state == .disabled ? "存在旧版残留" : "\(state.label) · 含旧版残留"
+                } else {
+                    state.label
+                }
+                let statusBadgeTint: Color = (hasLegacy && state == .disabled) ? .orange : helperStatusTint(state)
+
                 Divider().opacity(0.4)
 
                 HStack(spacing: 8) {
@@ -918,18 +920,22 @@ struct AdvancedSamplingCard: View {
                         .font(BBType.captionMedium)
                         .foregroundStyle(.secondary)
                     Spacer()
-                    StatusPillBadge(text: state.label, tint: helperStatusTint(state), showDot: true)
+                    StatusPillBadge(text: statusBadgeText, tint: statusBadgeTint, showDot: true)
                 }
 
                 HStack(spacing: 10) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Text("后台辅助服务")
+                        Text(hasLegacy ? "旧版后台辅助服务残留" : "后台辅助服务")
                             .font(BBType.captionMedium)
                             .foregroundStyle(Color.bbInk)
-                        Text("移除需管理员授权，再次开启高级采样时将重新安装")
-                            .font(BBType.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Text(
+                            hasLegacy
+                                ? "检测到旧版 BatteryBar 后台服务残留，点击右侧按钮可一并移除"
+                                : "移除需管理员授权，再次开启高级采样时将重新安装"
+                        )
+                        .font(BBType.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 8)
                     Button {
@@ -956,7 +962,11 @@ struct AdvancedSamplingCard: View {
             }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("移除辅助服务需要一次管理员授权。移除后，再次开启高级采样时需要重新安装后台服务。")
+            Text(
+                sampler.hasLegacyHelperInstalled
+                    ? "移除辅助服务需要一次管理员授权，将同时清理旧版 BatteryBar 与当前版本的后台服务。移除后，再次开启高级采样时需要重新安装。"
+                    : "移除辅助服务需要一次管理员授权。移除后，再次开启高级采样时需要重新安装后台服务。"
+            )
         }
     }
 

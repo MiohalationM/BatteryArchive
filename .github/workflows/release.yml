@@ -68,7 +68,12 @@ jobs:
           cat > RELEASE_NOTES.md <<EOF
           ## BatteryArchive ${RELEASE_TAG}
 
-          Native macOS 14.0+ menu-bar battery health, usage, and power monitor — 100% local, zero telemetry.
+          Native macOS 14.0+ (Apple Silicon) menu-bar battery health, usage, and power monitor — 100% local, zero telemetry.
+
+          ### 系统要求 / Requirements
+
+          - 预构建 DMG 需要 **macOS 14.0+（Apple Silicon）**；Intel Mac 请在本机从源码编译（\`bash scripts/build-dmg.sh\` 或 \`bash scripts/update.sh\`）。
+          - Prebuilt DMG requires **macOS 14.0+ (Apple Silicon)**; Intel Mac users can build locally from source (\`bash scripts/build-dmg.sh\` or \`bash scripts/update.sh\`).
 
           ### 安装 / Installation
 

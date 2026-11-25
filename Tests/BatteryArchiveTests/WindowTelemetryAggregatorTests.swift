@@ -218,4 +218,50 @@ import Testing
         #expect(minute.batteryDischargeWh == 0)
         #expect(minute.batteryChargeSeconds == 0)
     }
+
+    /// 跨分钟保持尾巴结算反例：00:50 的 30 秒保持跨越 01:00 边界到 01:20，
+    /// 即使下一读数跳过整整一分钟落到 02:10，仍应分别结算 00:00（10s）与 01:00（20s），
+    /// 且之后的长缺口（05:10）绝不为真正空缺的 03:00 / 04:00 生成空窗口。
+    @Test func crossMinuteHoldTailSettlesWithoutEmittingEmptyMinutes() throws {
+        var agg = WindowTelemetryAggregator()
+        aggregate(&agg, at: w0.addingTimeInterval(50), load: 12, channel: .discharge(8), temperature: 32, interval: 15)
+        aggregate(&agg, at: w0.addingTimeInterval(130), load: 10, channel: .discharge(6), temperature: 30, interval: 15)
+
+        let firstBatch = agg.takeCompletedAggregates()
+        #expect(firstBatch.map(\.windowStart) == [w0, w0.addingTimeInterval(60)])
+
+        let m0 = firstBatch[0]
+        #expect(abs(m0.systemCoverage - 10.0 / 60.0) < 1e-9)
+        #expect(abs((m0.systemEnergyWh ?? 0) - 12.0 * 10.0 / 3600.0) < 1e-9)
+        #expect(abs(m0.batteryDischargeSeconds - 10) < 1e-9)
+        #expect(abs(m0.batteryDischargeWh - 8.0 * 10.0 / 3600.0) < 1e-9)
+        #expect(abs(m0.temperatureCoverage - 10.0 / 60.0) < 1e-9)
+        #expect(m0.temperatureAverage == 32)
+
+        let m1 = firstBatch[1]
+        #expect(abs(m1.systemCoverage - 20.0 / 60.0) < 1e-9)
+        #expect(abs((m1.systemEnergyWh ?? 0) - 12.0 * 20.0 / 3600.0) < 1e-9)
+        #expect(abs(m1.batteryDischargeSeconds - 20) < 1e-9)
+        #expect(abs(m1.batteryDischargeWh - 8.0 * 20.0 / 3600.0) < 1e-9)
+        #expect(abs(m1.temperatureCoverage - 20.0 / 60.0) < 1e-9)
+        #expect(m1.temperatureAverage == 32)
+        #expect(m1.temperatureMaximum == 32)
+
+        // 02:10 的保持在 02:40 到期；跳到 05:10 只结算 02:00，不得为 03:00 / 04:00 生成空分钟
+        aggregate(&agg, at: w0.addingTimeInterval(310), load: 5, interval: 15)
+        let secondBatch = agg.takeCompletedAggregates()
+        #expect(secondBatch.map(\.windowStart) == [w0.addingTimeInterval(120)])
+        #expect(abs(secondBatch[0].systemCoverage - 0.5) < 1e-9)
+
+        // 充电通道在直接跨多分钟长缺口（00:50 -> 05:10）时同样结算 00:00（10s）与 01:00（20s）且不生成 02:00..04:00
+        var chargeAgg = WindowTelemetryAggregator()
+        aggregate(&chargeAgg, at: w0.addingTimeInterval(50), load: nil, channel: .charge(24), interval: 15)
+        aggregate(&chargeAgg, at: w0.addingTimeInterval(310), load: nil, channel: .charge(12), interval: 15)
+        let chargeBatch = chargeAgg.takeCompletedAggregates()
+        #expect(chargeBatch.map(\.windowStart) == [w0, w0.addingTimeInterval(60)])
+        #expect(abs(chargeBatch[0].batteryChargeSeconds - 10) < 1e-9)
+        #expect(abs(chargeBatch[0].batteryChargeWh - 24.0 * 10.0 / 3600.0) < 1e-9)
+        #expect(abs(chargeBatch[1].batteryChargeSeconds - 20) < 1e-9)
+        #expect(abs(chargeBatch[1].batteryChargeWh - 24.0 * 20.0 / 3600.0) < 1e-9)
+    }
 }

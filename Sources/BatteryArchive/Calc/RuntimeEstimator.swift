@@ -488,6 +488,26 @@ enum RuntimeEstimator {
         )
     }
 
+    /// 充电估算展示优先级：
+    /// - 无 App 估算时回退到系统 100% 充满估算；
+    /// - 目标为 100% 且 App 估算仅依赖未聚合单点实时功率（`batteryPower` 且 `evidenceDuration < 120`）时，
+    ///   若系统提供了充满估算则优先系统值，避免冷启动单点高功率波动低估涓流耗时；
+    /// - 其余情况（历史斜率、已聚合 ≥120 秒功率证据或 80/85/90/95% 自定义上限）优先 App 估算。
+    static func preferredChargeEstimate(
+        app: EstimationResult?,
+        system: EstimationResult?
+    ) -> EstimationResult? {
+        guard let app else { return system }
+        if let system,
+           let goal = app.goalPercent,
+           goal >= 100,
+           app.basis == .batteryPower,
+           app.evidenceDuration < 120 {
+            return system
+        }
+        return app
+    }
+
     // MARK: - 纯函数工具
 
     private static func contiguousPoints(_ input: Inputs, since start: Date, charging: Bool) -> [(Date, Double)] {

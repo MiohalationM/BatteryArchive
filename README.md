@@ -52,7 +52,7 @@
 
 ## 安装
 
-需要 **macOS 14.0 (Sonoma)** 及以上版本。
+预构建 Release DMG 需要 **macOS 14.0 (Sonoma) 及以上版本（Apple Silicon）**；Intel Mac 请参考下方 [源码构建](#源码构建) 在本机编译。
 
 1. 前往 [Releases](../../releases/latest) 下载最新的 `BatteryArchive-*.dmg`。
 2. 打开镜像，将 **BatteryArchive** 拖入 `Applications` 文件夹即可使用。
@@ -77,7 +77,7 @@
 
 ## 源码构建
 
-需要 Xcode（Swift 6.2+），无第三方依赖：
+需要 Xcode（Swift 6.2+），无第三方依赖（Apple Silicon 与 Intel Mac 均可本机编译）：
 
 ```bash
 swift test                    # 运行单元测试

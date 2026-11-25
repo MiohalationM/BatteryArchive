@@ -2,6 +2,11 @@ import Foundation
 
 /// Permanent, small daily totals; never contains the detailed chart samples.
 struct UsageDailySummary: Codable, Equatable, Sendable, Identifiable {
+    struct CoveredInterval: Codable, Equatable, Sendable {
+        var start: Date
+        var end: Date
+    }
+
     var version = 1
     var measurementEpoch: UUID
     var timeZoneID: String
@@ -15,7 +20,16 @@ struct UsageDailySummary: Codable, Equatable, Sendable, Identifiable {
     var dischargeWh: Double = 0
     var powerSeconds: Double = 0
     var estimatedSeconds: Double = 0
+    /// 已计入该日汇总的有序不重叠区间；旧版 JSON 缺键解码为 nil，回退为 `[firstRecord, appliedThrough)`。
+    var coveredIntervals: [CoveredInterval]?
     var id: String { "\(measurementEpoch)|\(timeZoneID)|\(date.timeIntervalSince1970)" }
+
+    var effectiveCoveredIntervals: [CoveredInterval] {
+        if let coveredIntervals { return coveredIntervals }
+        return appliedThrough > firstRecord
+            ? [CoveredInterval(start: firstRecord, end: appliedThrough)]
+            : []
+    }
 
     init(bucket: UsageBucket) {
         measurementEpoch = bucket.measurementEpoch
@@ -25,21 +39,54 @@ struct UsageDailySummary: Codable, Equatable, Sendable, Identifiable {
         date = calendar.startOfDay(for: bucket.start)
         firstRecord = bucket.start
         appliedThrough = bucket.start
+        coveredIntervals = []
     }
 
-    mutating func include(_ bucket: UsageBucket) {
+    @discardableResult
+    mutating func include(_ bucket: UsageBucket) -> Bool {
         var checked = bucket
         checked.isLive = false
         guard checked.isValid, bucket.measurementEpoch == measurementEpoch,
-              bucket.timeZoneID == timeZoneID, bucket.start >= appliedThrough else { return }
+              bucket.timeZoneID == timeZoneID else { return false }
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: timeZoneID)!
         let dayEnd = calendar.dateInterval(of: .day, for: date)?.end
             ?? calendar.date(byAdding: .day, value: 1, to: date)!
         guard calendar.startOfDay(for: bucket.start) == date,
-              bucket.end <= dayEnd else { return }
-        firstRecord = min(firstRecord, bucket.start)
-        appliedThrough = bucket.end
+              bucket.end <= dayEnd else { return false }
+
+        var intervals = effectiveCoveredIntervals
+        var lo = 0
+        var hi = intervals.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if intervals[mid].start < bucket.start {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        if lo > 0, intervals[lo - 1].end > bucket.start { return false }
+        if lo < intervals.count, intervals[lo].start < bucket.end { return false }
+
+        let wasEmpty = intervals.isEmpty
+        intervals.insert(CoveredInterval(start: bucket.start, end: bucket.end), at: lo)
+        if lo + 1 < intervals.count, intervals[lo].end == intervals[lo + 1].start {
+            intervals[lo].end = intervals[lo + 1].end
+            intervals.remove(at: lo + 1)
+        }
+        if lo > 0, intervals[lo - 1].end == intervals[lo].start {
+            intervals[lo - 1].end = intervals[lo].end
+            intervals.remove(at: lo)
+        }
+        coveredIntervals = intervals
+        if wasEmpty {
+            firstRecord = bucket.start
+            appliedThrough = bucket.end
+        } else {
+            firstRecord = min(firstRecord, bucket.start)
+            appliedThrough = max(appliedThrough, bucket.end)
+        }
         onPowerSeconds += bucket.onPowerSeconds
         screenOnSeconds += bucket.screenOnSeconds
         screenOffSeconds += bucket.screenOffSeconds
@@ -47,6 +94,7 @@ struct UsageDailySummary: Codable, Equatable, Sendable, Identifiable {
         dischargeWh += bucket.dischargeWh
         powerSeconds += bucket.powerSeconds
         estimatedSeconds += bucket.estimatedSeconds
+        return true
     }
 
     var isValid: Bool {
@@ -58,6 +106,22 @@ struct UsageDailySummary: Codable, Equatable, Sendable, Identifiable {
         calendar.timeZone = zone
         let end = calendar.dateInterval(of: .day, for: date)?.end
             ?? calendar.date(byAdding: .day, value: 1, to: date)!
+        if let intervals = coveredIntervals {
+            guard !intervals.isEmpty else { return false }
+            var previousEnd = date
+            for interval in intervals {
+                guard interval.start.timeIntervalSince1970.isFinite,
+                      interval.end.timeIntervalSince1970.isFinite,
+                      interval.start < interval.end,
+                      interval.start >= previousEnd,
+                      interval.end <= end else { return false }
+                previousEnd = interval.end
+            }
+            guard abs(intervals.first!.start.timeIntervalSince(firstRecord)) <= 0.001,
+                  abs(intervals.last!.end.timeIntervalSince(appliedThrough)) <= 0.001 else {
+                return false
+            }
+        }
         let values = [onPowerSeconds, screenOnSeconds, screenOffSeconds, sleepSeconds,
                       dischargeWh, powerSeconds, estimatedSeconds]
         return calendar.startOfDay(for: date) == date
@@ -78,9 +142,7 @@ struct UsageDailySummary: Codable, Equatable, Sendable, Identifiable {
             guard checked.isValid else { continue }
             let seed = UsageDailySummary(bucket: bucket)
             var summary = byID[seed.id] ?? seed
-            let previousAppliedThrough = summary.appliedThrough
-            summary.include(bucket)
-            if summary.appliedThrough != previousAppliedThrough {
+            if summary.include(bucket) {
                 byID[summary.id] = summary
             }
         }

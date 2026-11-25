@@ -125,7 +125,7 @@ struct SettingsView: View {
 
                 notificationToggle(
                     title: "充电目标提醒",
-                    detail: "充电达到系统设定上限并停止充电时提醒",
+                    detail: "充满或达到系统设定上限并停止充电时提醒",
                     isOn: Binding(
                         get: { notifier.fullChargeEnabled },
                         set: { newValue in

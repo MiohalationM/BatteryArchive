@@ -629,4 +629,71 @@ import Testing
         var unavailable = input; unavailable.systemReportedMinutes = -1
         #expect(RuntimeEstimator.systemReportedChargeEstimate(unavailable) == nil)
     }
+
+    @Test func preferredChargeEstimatePrefersSystemOverUnaggregatedLivePowerAtFullTarget() throws {
+        // 审计反例：81% 电量、40 W 单点实时功率、0 历史快照与分钟聚合、目标 100%、系统报告 35 分钟
+        var input = RuntimeEstimator.Inputs()
+        input.now = t0.addingTimeInterval(600)
+        input.currentLevel = 81
+        input.externalConnected = true
+        input.isCharging = true
+        input.fullChargeCapacityMah = 5000
+        input.voltageMV = 12_000
+        input.liveChargeWatts = 40
+        input.chargeTargetPercent = 100
+        input.systemReportedMinutes = 35
+
+        let liveApp = try #require(RuntimeEstimator.chargeEstimate(input))
+        #expect(liveApp.basis == .batteryPower)
+        #expect(liveApp.evidenceDuration == 0)
+        #expect(liveApp.goalPercent == 100)
+
+        let system35 = try #require(RuntimeEstimator.systemReportedChargeEstimate(input))
+        #expect(system35.basis == .systemReported)
+        #expect(abs(system35.valueHours - 35.0 / 60.0) < 1e-9)
+
+        // 未聚合单点功率 + 100% 目标 + 系统估算可用 → 优先系统 35 分钟
+        let pickedLive = try #require(RuntimeEstimator.preferredChargeEstimate(app: liveApp, system: system35))
+        #expect(pickedLive == system35)
+
+        // 系统估算不可用时仍保留单点功率估算
+        #expect(RuntimeEstimator.preferredChargeEstimate(app: liveApp, system: nil) == liveApp)
+        // App 估算不可用时回退系统估算
+        #expect(RuntimeEstimator.preferredChargeEstimate(app: nil, system: system35) == system35)
+        #expect(RuntimeEstimator.preferredChargeEstimate(app: nil, system: nil) == nil)
+
+        // 一旦累积 ≥120 秒分钟聚合功率证据 → 切回 App 估算
+        var aggregatedInput = input
+        aggregatedInput.minuteAggregates = chargeAggregates(watts: 20, minutes: 2, endingAt: aggregatedInput.now)
+        let aggregatedApp = try #require(RuntimeEstimator.chargeEstimate(aggregatedInput))
+        #expect(aggregatedApp.basis == .batteryPower)
+        #expect(aggregatedApp.evidenceDuration == 120)
+        #expect(RuntimeEstimator.preferredChargeEstimate(app: aggregatedApp, system: system35) == aggregatedApp)
+
+        // 历史斜率估算即使在 100% 目标也优先于系统估算
+        var slopeInput = input
+        slopeInput.now = t0.addingTimeInterval(1800)
+        slopeInput.currentLevel = 60
+        slopeInput.snapshots = (0...30).map { minute in
+            snapshot(TimeInterval(minute * 60), 54 + Double(minute) * 0.2,
+                     externalConnected: true, isCharging: true)
+        }
+        let slopeApp = try #require(RuntimeEstimator.chargeEstimate(slopeInput))
+        #expect(slopeApp.basis == .historicalSlope)
+        let slopeSystem = try #require(RuntimeEstimator.systemReportedChargeEstimate(slopeInput))
+        #expect(RuntimeEstimator.preferredChargeEstimate(app: slopeApp, system: slopeSystem) == slopeApp)
+
+        // 85% 自定义上限（无系统 85% 估算）仍采用 liveChargeWatts 功率估算
+        var customLimit = input
+        customLimit.chargeTargetPercent = 85
+        let customApp = try #require(RuntimeEstimator.chargeEstimate(customLimit))
+        #expect(customApp.basis == .batteryPower)
+        #expect(customApp.goalPercent == 85)
+        #expect(customApp.evidenceDuration == 0)
+        let customSystem = RuntimeEstimator.systemReportedChargeEstimate(customLimit)
+        #expect(customSystem == nil)
+        #expect(RuntimeEstimator.preferredChargeEstimate(app: customApp, system: customSystem) == customApp)
+        // 即使传入非空系统 100% 估算，非 100% 目标也绝不采用系统值
+        #expect(RuntimeEstimator.preferredChargeEstimate(app: customApp, system: system35) == customApp)
+    }
 }

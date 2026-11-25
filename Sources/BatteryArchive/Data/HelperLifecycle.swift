@@ -48,6 +48,12 @@ protocol HelperLifecycleOps: Sendable {
     func uninstall() async -> Bool
     /// 休眠态检查：区分缺失/当前/需更新（不建立 XPC、不触发 launchd）
     func installedHelperState() async -> InstalledHelperState
+    /// 只读检查磁盘上是否存在旧版 BatteryBar 后台服务残留（不建立 XPC、不触发 launchd）
+    func hasLegacyHelperInstalled() async -> Bool
+}
+
+extension HelperLifecycleOps {
+    func hasLegacyHelperInstalled() async -> Bool { false }
 }
 
 /// Privileged disk operations stay off the main actor; XPC is genuinely async.
@@ -57,7 +63,8 @@ struct SystemHelperLifecycleOps: HelperLifecycleOps {
 
     func installOrUpdate() async -> Bool {
         let diskState = await installedHelperState()
-        if diskState == .current {
+        let hasLegacy = await hasLegacyHelperInstalled()
+        if diskState == .current, !hasLegacy {
             if (try? await client.checkVersion()) != nil {
                 return true
             }
@@ -69,7 +76,9 @@ struct SystemHelperLifecycleOps: HelperLifecycleOps {
             do { try await client.checkVersion(); return true }
             catch { return false }
         }
-        let ok = await Task.detached(priority: .userInitiated) { installer.installHelperIfNeeded() }.value
+        let ok = await Task.detached(priority: .userInitiated) {
+            installer.installHelperIfNeeded(force: hasLegacy)
+        }.value
         guard ok else { return false }
         do { try await client.checkVersion(); return true }
         catch { return false }
@@ -81,6 +90,10 @@ struct SystemHelperLifecycleOps: HelperLifecycleOps {
 
     func installedHelperState() async -> InstalledHelperState {
         await Task.detached(priority: .utility) { installer.installedState() }.value
+    }
+
+    func hasLegacyHelperInstalled() async -> Bool {
+        await Task.detached(priority: .utility) { installer.hasLegacyHelperInstalled() }.value
     }
 }
 
@@ -97,6 +110,7 @@ final class HelperLifecycleController {
     private let ops: any HelperLifecycleOps
     private(set) var state: HelperLifecycleState = .disabled
     private(set) var installedState: InstalledHelperState = .notInstalled
+    private(set) var legacyHelperInstalled = false
     private(set) var lastErrorMessage: String?
     /// 每次新的用户意图都会推进代际；await 返回的旧操作只能丢弃结果。
     private var operationGeneration: UInt64 = 0
@@ -110,14 +124,16 @@ final class HelperLifecycleController {
         self.ops = ops
     }
 
-    /// 启动时检查：只查询已安装 Helper 是否需要更新。不安装、不升级、绝不触发管理员授权。
+    /// 启动时检查：只查询已安装 Helper 是否需要更新及是否存在旧版残留。不安装、不升级、绝不触发管理员授权。
     @discardableResult
     func refreshAtStartup(enabled: Bool) async -> HelperLifecycleState {
         let generation = operationGeneration
         let installedState = await ops.installedHelperState()
+        let hasLegacy = await ops.hasLegacyHelperInstalled()
         // 用户在检查期间执行了开启/关闭/移除：启动旧结果不得覆盖新意图。
         guard generation == operationGeneration else { return state }
         self.installedState = installedState
+        self.legacyHelperInstalled = hasLegacy
 
         switch installedState {
         case .needsUpdate:
@@ -143,8 +159,11 @@ final class HelperLifecycleController {
         lastErrorMessage = nil
         let ok = await ops.installOrUpdate()
         privilegedOperationInFlight = false
-        // 即使运行态意图已变化，成功安装的磁盘事实仍应如实保留。
-        if ok { installedState = .current }
+        // 即使运行态意图已变化，成功安装的磁盘事实（含旧版清理）仍应如实保留。
+        if ok {
+            installedState = .current
+            legacyHelperInstalled = false
+        }
         // 例如安装授权期间用户已关闭：即使磁盘安装完成，也不得复活运行态。
         guard generation == operationGeneration else { return false }
         if ok {
@@ -173,7 +192,10 @@ final class HelperLifecycleController {
         lastErrorMessage = nil
         let ok = await ops.uninstall()
         privilegedOperationInFlight = false
-        if ok { installedState = .notInstalled }
+        if ok {
+            installedState = .notInstalled
+            legacyHelperInstalled = false
+        }
         guard generation == operationGeneration else { return false }
         if ok {
             state = .disabled

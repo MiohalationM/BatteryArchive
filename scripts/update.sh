@@ -81,3 +81,11 @@ echo "=== 更新完成 ==="
 echo "BatteryArchive 已更新并启动"
 echo ""
 echo "首次开启高级采样时会安装后台服务（需要管理员授权）"
+
+LEGACY_HELPER_BIN="/Library/PrivilegedHelperTools/com.batterybar.helper"
+LEGACY_HELPER_PLIST="/Library/LaunchDaemons/com.batterybar.helper.plist"
+if [ -e "$LEGACY_HELPER_BIN" ] || [ -L "$LEGACY_HELPER_BIN" ] || [ -e "$LEGACY_HELPER_PLIST" ] || [ -L "$LEGACY_HELPER_PLIST" ]; then
+    echo ""
+    echo "提示：检测到旧版 BatteryBar 后台服务残留（com.batterybar.helper）。"
+    echo "请前往 BatteryArchive「设置 → 高级采样 → 移除辅助服务…」一键清理。"
+fi

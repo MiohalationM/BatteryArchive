@@ -25,7 +25,6 @@ final class UsageHistoryStore {
     private let dailyStore: UsageDailyStore
     private let decoder = JSONDecoder()
     private let encoder = JSONEncoder()
-    private var replayEnd = Date.distantPast
     private var entries: [Entry] = []
     private var ids = Set<String>()
     private var expiredLines = 0
@@ -79,8 +78,8 @@ final class UsageHistoryStore {
                           bucket.start <= now.addingTimeInterval(300),
                           !ids.contains(bucket.id) else { continue }
                     // No double counting overlapping intervals, including after a wall
-                    // clock correction. A later nonoverlapping bucket can recover.
-                    if let last = entries.last, bucket.start < last.end {
+                    // clock correction. Non-overlapping earlier gaps after rollback are accepted.
+                    guard let insertionIndex = nonOverlappingInsertionIndex(forStart: bucket.start, end: bucket.end) else {
                         rejectedOverlap = true
                         continue
                     }
@@ -88,8 +87,13 @@ final class UsageHistoryStore {
                     var terminated = line
                     terminated.append(0x0A)
                     try handle.write(contentsOf: terminated)
-                    entries.append(Entry(id: bucket.id, start: bucket.start, end: bucket.end,
-                                         timeZoneID: bucket.timeZoneID, offset: offset, length: line.count))
+                    let entry = Entry(id: bucket.id, start: bucket.start, end: bucket.end,
+                                      timeZoneID: bucket.timeZoneID, offset: offset, length: line.count)
+                    if insertionIndex == entries.count {
+                        entries.append(entry)
+                    } else {
+                        entries.insert(entry, at: insertionIndex)
+                    }
                     ids.insert(bucket.id)
                     offset += UInt64(terminated.count)
                     dailyStore.include(bucket, allowRecovery: bucket.end > now.addingTimeInterval(-Self.retention))
@@ -144,6 +148,7 @@ final class UsageHistoryStore {
             defer { try? handle.close() }
             var pending = Data()
             var offset: UInt64 = 0
+            var replayedIntervals: [(start: Date, end: Date)] = []
             while true {
                 let done: Bool = try autoreleasepool {
                     guard let chunk = try handle.read(upToCount: 65_536), !chunk.isEmpty else {
@@ -152,7 +157,7 @@ final class UsageHistoryStore {
                     pending.append(chunk)
                     while let newline = pending.firstIndex(of: 0x0A) {
                         let line = Data(pending[..<newline])
-                        index(line: line, at: offset, now: now)
+                        index(line: line, at: offset, now: now, replayedIntervals: &replayedIntervals)
                         let consumed = pending.distance(from: pending.startIndex, to: newline) + 1
                         offset += UInt64(consumed)
                         pending.removeSubrange(pending.startIndex...newline)
@@ -163,7 +168,7 @@ final class UsageHistoryStore {
             }
             if !pending.isEmpty {
                 // A complete JSON final line is accepted; an interrupted one is skipped.
-                index(line: pending, at: offset, now: now)
+                index(line: pending, at: offset, now: now, replayedIntervals: &replayedIntervals)
                 needsSeparator = true
             }
             try dailyStore.flush()
@@ -173,31 +178,103 @@ final class UsageHistoryStore {
         }
     }
 
-    private func index(line: Data, at offset: UInt64, now: Date) {
+    private func index(
+        line: Data,
+        at offset: UInt64,
+        now: Date,
+        replayedIntervals: inout [(start: Date, end: Date)]
+    ) {
         guard !line.isEmpty else { return }
         guard let bucket = try? decoder.decode(UsageBucket.self, from: line), bucket.isValid else {
             skippedLines += 1
             return
         }
-        guard bucket.start <= now.addingTimeInterval(300), bucket.start >= replayEnd else {
+        guard bucket.start <= now.addingTimeInterval(300) else {
             skippedLines += 1
             return
         }
-        replayEnd = bucket.end
+        guard !ids.contains(bucket.id),
+              Self.insertNonOverlapping(start: bucket.start, end: bucket.end, into: &replayedIntervals) else {
+            skippedLines += 1
+            return
+        }
         let withinRetention = bucket.end > now.addingTimeInterval(-Self.retention)
         dailyStore.include(bucket, allowRecovery: withinRetention)
         guard withinRetention else {
             expiredLines += 1
             return
         }
-        guard ids.insert(bucket.id).inserted else { return }
-        if let last = entries.last, bucket.start < last.end {
-            ids.remove(bucket.id)
+        guard let insertionIndex = nonOverlappingInsertionIndex(forStart: bucket.start, end: bucket.end) else {
             skippedLines += 1
             return
         }
-        entries.append(Entry(id: bucket.id, start: bucket.start, end: bucket.end,
-                             timeZoneID: bucket.timeZoneID, offset: offset, length: line.count))
+        ids.insert(bucket.id)
+        let entry = Entry(id: bucket.id, start: bucket.start, end: bucket.end,
+                          timeZoneID: bucket.timeZoneID, offset: offset, length: line.count)
+        if insertionIndex == entries.count {
+            entries.append(entry)
+        } else {
+            entries.insert(entry, at: insertionIndex)
+        }
+    }
+
+    /// 返回 `entries`（按 `(start, end)` 升序且两两不重叠）的合法插入位置；若与任意既有区间重叠则返回 nil。
+    private func nonOverlappingInsertionIndex(forStart start: Date, end: Date) -> Int? {
+        if let last = entries.last, start >= last.end {
+            return entries.count
+        }
+        var lo = 0
+        var hi = entries.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if entries[mid].start < start {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        if lo > 0, entries[lo - 1].end > start { return nil }
+        if lo < entries.count, entries[lo].start < end { return nil }
+        return lo
+    }
+
+    /// 将 `[start, end)` 插入有序不重叠并自动合并相邻区间的重放集合；若发生重叠返回 false。
+    private static func insertNonOverlapping(
+        start: Date,
+        end: Date,
+        into intervals: inout [(start: Date, end: Date)]
+    ) -> Bool {
+        if let last = intervals.last, start >= last.end {
+            if start == last.end {
+                intervals[intervals.count - 1].end = end
+            } else {
+                intervals.append((start, end))
+            }
+            return true
+        }
+        var lo = 0
+        var hi = intervals.count
+        while lo < hi {
+            let mid = (lo + hi) / 2
+            if intervals[mid].start < start {
+                lo = mid + 1
+            } else {
+                hi = mid
+            }
+        }
+        if lo > 0, intervals[lo - 1].end > start { return false }
+        if lo < intervals.count, intervals[lo].start < end { return false }
+
+        intervals.insert((start, end), at: lo)
+        if lo + 1 < intervals.count, intervals[lo].end == intervals[lo + 1].start {
+            intervals[lo].end = intervals[lo + 1].end
+            intervals.remove(at: lo + 1)
+        }
+        if lo > 0, intervals[lo - 1].end == intervals[lo].start {
+            intervals[lo - 1].end = intervals[lo].end
+            intervals.remove(at: lo)
+        }
+        return true
     }
 
     private func prune(now: Date) {

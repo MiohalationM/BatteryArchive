@@ -238,7 +238,7 @@ struct StatusPopover: View {
                     .foregroundStyle(.secondary)
             }
         } else if mode == .charging {
-            if let estimate = sampler.chargeEstimate ?? sampler.systemReportedChargeEstimate,
+            if let estimate = sampler.preferredChargeEstimate,
                let goal = estimate.goalPercent {
                 let duration = UsageTimeFormat.duration(estimate.valueHours * 3_600)
                 let targetText = Int(goal) >= 100 ? "充满" : "达 \(Int(goal))%"

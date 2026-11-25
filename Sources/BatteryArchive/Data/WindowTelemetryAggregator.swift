@@ -304,12 +304,37 @@ struct WindowTelemetryAggregator {
         )
     }
 
-    /// 跨越窗口边界时收尾当前窗口；中间完全缺失的分钟不生成空窗口。
+    private static func hasUnconsumedHold(
+        _ stream: HoldStream,
+        after boundary: Date,
+        upTo date: Date
+    ) -> Bool {
+        guard stream.value != nil else { return false }
+        let upper = min(date, stream.validUntil)
+        let lower = max(stream.attributedTo, stream.validFrom, boundary)
+        return upper > lower
+    }
+
+    private func hasAnyUnconsumedHold(after boundary: Date, upTo date: Date) -> Bool {
+        Self.hasUnconsumedHold(systemStream, after: boundary, upTo: date)
+            || Self.hasUnconsumedHold(chargeStream, after: boundary, upTo: date)
+            || Self.hasUnconsumedHold(dischargeStream, after: boundary, upTo: date)
+            || Self.hasUnconsumedHold(temperatureStream, after: boundary, upTo: date)
+    }
+
+    /// 跨越窗口边界时收尾当前窗口；若有效保持尾巴跨过分钟边界进入后续分钟，
+    /// 先为该有实质保持的分钟结算入队，再跳过中间完全缺失的空分钟直达目标窗口。
     private mutating func advanceWindows(through date: Date) {
         if let start = windowStart, date < start.addingTimeInterval(Self.windowLength) { return }
         let targetStart = Self.floorToWindow(date)
-        if windowStart != nil {
+        if let start = windowStart {
             finalizeCurrentWindow()
+            var nextStart = start.addingTimeInterval(Self.windowLength)
+            while nextStart < targetStart, hasAnyUnconsumedHold(after: nextStart, upTo: date) {
+                beginWindow(at: nextStart)
+                finalizeCurrentWindow()
+                nextStart = nextStart.addingTimeInterval(Self.windowLength)
+            }
         }
         beginWindow(at: targetStart)
     }

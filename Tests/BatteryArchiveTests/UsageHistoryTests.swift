@@ -395,6 +395,168 @@ import Testing
         #expect(afterAppend.buckets == retained + [extra])
     }
 
+    @Test func clockRollbackPreservesNonOverlappingEarlierBucketsAcrossRestartAndRejectsTrueOverlaps() throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let utc = TimeZone(secondsFromGMT: 0)!
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = utc
+
+        let dayStart = calendar.startOfDay(for: now)
+        let preStart = dayStart.addingTimeInterval(12 * 3_600)       // 12:00:00Z
+        let postStart = dayStart.addingTimeInterval(11 * 3_600)      // 11:00:00Z (1h rollback)
+        let writeNow = preStart.addingTimeInterval(120)
+
+        let store = UsageHistoryStore(directory: dir, now: writeNow)
+        var aggregator = UsageTelemetryAggregator(measurementEpoch: store.measurementEpoch)
+        // Pre-rollback 30s discharge at 6W (0.05 Wh)
+        aggregator.observe(.init(
+            date: preStart, externalConnected: false, screenOn: true,
+            level: 80, dischargePower: 6, timeZone: utc, monotonicTime: 1_000
+        ))
+        aggregator.observe(.init(
+            date: preStart.addingTimeInterval(15), externalConnected: false, screenOn: true,
+            level: 80, dischargePower: 6, timeZone: utc, monotonicTime: 1_015
+        ))
+        aggregator.observe(.init(
+            date: preStart.addingTimeInterval(30), externalConnected: false, screenOn: true,
+            level: 80, dischargePower: 6, timeZone: utc, monotonicTime: 1_030
+        ))
+        // Wall clock rolls back 1h while monotonicTime advances monotonically; 30s discharge at 6W (0.05 Wh)
+        aggregator.observe(.init(
+            date: postStart, externalConnected: false, screenOn: true,
+            level: 79, dischargePower: 6, timeZone: utc, monotonicTime: 1_045
+        ))
+        aggregator.observe(.init(
+            date: postStart.addingTimeInterval(15), externalConnected: false, screenOn: true,
+            level: 79, dischargePower: 6, timeZone: utc, monotonicTime: 1_060
+        ))
+        aggregator.observe(.init(
+            date: postStart.addingTimeInterval(30), externalConnected: false, screenOn: true,
+            level: 79, dischargePower: 6, timeZone: utc, monotonicTime: 1_075
+        ))
+        aggregator.stop(at: postStart.addingTimeInterval(30), monotonicTime: 1_075)
+
+        let generated = aggregator.takeCompleted()
+        #expect(generated.count == 2)
+        store.append(generated, now: writeNow)
+        #expect(store.lastError == nil)
+
+        // True overlapping bucket inside the rolled-back range must still be rejected
+        var overlapping = bucket(at: postStart.addingTimeInterval(15))
+        overlapping.measurementEpoch = store.measurementEpoch
+        store.append([overlapping], now: writeNow)
+        #expect(store.lastError != nil)
+
+        // Reopen from disk and verify journal replay, daily summaries, and reviews keep both ranges
+        let reopened = UsageHistoryStore(directory: dir, now: writeNow)
+        let dayInterval = DateInterval(start: dayStart, end: dayStart.addingTimeInterval(86_400))
+        let page = reopened.read(in: dayInterval, now: writeNow)
+        #expect(page.error == nil)
+        #expect(page.skippedLines == 0)
+        #expect(page.buckets.count == 2)
+        #expect(page.buckets[0].start == postStart)
+        #expect(page.buckets[1].start == preStart)
+
+        let summaries = reopened.dailySummaries()
+        let summary = try #require(summaries.first)
+        #expect(summary.isValid)
+        #expect(summary.firstRecord == postStart)
+        #expect(summary.appliedThrough == preStart.addingTimeInterval(30))
+        #expect(summary.coveredIntervals?.count == 2)
+        #expect(summary.screenOnSeconds == 60)
+        #expect(abs(summary.dischargeWh - 0.10) < 1e-9)
+
+        let review = try #require(UsageHistoryAnalysis.reviews(
+            stored: page.buckets, live: [], dates: [preStart], calendar: calendar, now: writeNow
+        ).first)
+        #expect(review.screenOnSeconds == 60)
+        #expect(abs(review.dischargeWh - 0.10) < 1e-9)
+
+        // Legacy daily summary JSON (missing coveredIntervals) stays valid and supports rollback merging
+        var legacySummary = summary
+        legacySummary.coveredIntervals = nil
+        legacySummary.firstRecord = preStart
+        legacySummary.appliedThrough = preStart.addingTimeInterval(30)
+        legacySummary.screenOnSeconds = 30
+        legacySummary.powerSeconds = 30
+        legacySummary.dischargeWh = 0.05
+        #expect(legacySummary.isValid)
+        let merged = UsageDailySummary.merging([legacySummary], live: [page.buckets[0], overlapping], zone: utc.identifier)
+        #expect(merged.count == 1)
+        #expect(merged[0].screenOnSeconds == 60)
+        #expect(abs(merged[0].dischargeWh - 0.10) < 1e-9)
+    }
+
+    @Test func corruptDailySummaryRecoveryPersistsPastThirtyDayRetentionAndCleansUpAfterRepair() throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+
+        let dayDStart = calendar.startOfDay(for: now.addingTimeInterval(-45 * 86_400)).addingTimeInterval(3_600)
+        let dayDNow = dayDStart.addingTimeInterval(600)
+        let dayD1Now = dayDStart.addingTimeInterval(86_400)
+        let dayD40Now = dayDStart.addingTimeInterval(40 * 86_400)
+
+        let original = UsageHistoryStore(directory: dir, now: dayDNow)
+        let dayDBuckets = (0..<5).map { index in
+            var value = bucket(at: dayDStart.addingTimeInterval(Double(index) * 60))
+            value.measurementEpoch = original.measurementEpoch
+            return value
+        }
+        original.append(dayDBuckets, now: dayDNow)
+
+        let dailyDir = dir.appendingPathComponent("usage-daily")
+        let checkpoint = try #require(FileManager.default.contentsOfDirectory(
+            at: dailyDir, includingPropertiesForKeys: nil
+        ).first { $0.pathExtension == "json" && !$0.lastPathComponent.hasSuffix(".recovered.json") })
+        let healthyBackup = try Data(contentsOf: checkpoint)
+        let damagedBytes = Data("corrupt daily checkpoint".utf8)
+        try damagedBytes.write(to: checkpoint)
+
+        // Restart on Day D+1 (within 30-day retention): recovers from journal and persists sidecar .recovered.json
+        let dayD1Store = UsageHistoryStore(directory: dir, now: dayD1Now)
+        let dayD1Summary = try #require(dayD1Store.dailySummaries().first {
+            $0.measurementEpoch == original.measurementEpoch
+        })
+        #expect(dayD1Summary.screenOnSeconds == 150)
+        #expect(abs(dayD1Summary.dischargeWh - 0.25) < 1e-9)
+        #expect(dayD1Store.read(in: DateInterval(start: dayDStart, end: dayD1Now), now: dayD1Now).error != nil)
+        #expect(try Data(contentsOf: checkpoint) == damagedBytes)
+
+        let sidecarFiles = try FileManager.default.contentsOfDirectory(
+            at: dailyDir, includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasSuffix(".recovered.json") }
+        #expect(sidecarFiles.count == 1)
+
+        // Advance clock +40 days (past 30-day detailed retention) and restart: persisted recovery survives!
+        let dayD40Store = UsageHistoryStore(directory: dir, now: dayD40Now)
+        let dayD40Summary = try #require(dayD40Store.dailySummaries().first {
+            $0.measurementEpoch == original.measurementEpoch
+        })
+        #expect(dayD40Summary.screenOnSeconds == 150)
+        #expect(abs(dayD40Summary.dischargeWh - 0.25) < 1e-9)
+        let dayD40Page = dayD40Store.read(in: DateInterval(start: dayDStart, end: dayD40Now), now: dayD40Now)
+        #expect(dayD40Page.buckets.isEmpty)
+        #expect(dayD40Page.error?.contains("原文件已保留") == true)
+        #expect(try Data(contentsOf: checkpoint) == damagedBytes)
+
+        // Repair the original file: obsolete .recovered.json sidecar is automatically removed
+        try healthyBackup.write(to: checkpoint, options: .atomic)
+        let repairedStore = UsageHistoryStore(directory: dir, now: dayD40Now)
+        let repairedSummary = try #require(repairedStore.dailySummaries().first {
+            $0.measurementEpoch == original.measurementEpoch
+        })
+        #expect(repairedSummary.screenOnSeconds == 150)
+        #expect(abs(repairedSummary.dischargeWh - 0.25) < 1e-9)
+        #expect(repairedStore.read(in: DateInterval(start: dayDStart, end: dayD40Now), now: dayD40Now).error == nil)
+        let remainingSidecars = try FileManager.default.contentsOfDirectory(
+            at: dailyDir, includingPropertiesForKeys: nil
+        ).filter { $0.lastPathComponent.hasSuffix(".recovered.json") }
+        #expect(remainingSidecars.isEmpty)
+    }
+
     @Test func corruptCheckpointPreservesExpiredJournalUntilRestartRecovery() throws {
         let dir = try directory()
         defer { try? FileManager.default.removeItem(at: dir) }

@@ -134,6 +134,11 @@ final class PowerSampler {
     private(set) var systemReportedEstimate: EstimationResult?
     /// IOPowerSources 的系统充满剩余时间（独立证据，仅在充电目标为 100% 时可用）
     private(set) var systemReportedChargeEstimate: EstimationResult?
+    /// 充电剩余时间展示优先级：100% 目标且仅有未聚合单点实时功率时优先采用系统估算，
+    /// 历史斜率、已聚合功率证据或自定义充电上限仍优先 App 估算。
+    var preferredChargeEstimate: EstimationResult? {
+        RuntimeEstimator.preferredChargeEstimate(app: chargeEstimate, system: systemReportedChargeEstimate)
+    }
 
     /// 最近完成的分钟聚合环形缓冲（估算器输入，硬上限）
     @ObservationIgnored private var recentAggregates: [MinuteAggregate] = []
@@ -153,8 +158,12 @@ final class PowerSampler {
     var helperState: HelperLifecycleState { helperLifecycle.state }
     /// 供 UI 门控按钮/开关：涵盖正在进行中的特权安装/卸载操作
     var isHelperBusy: Bool { helperLifecycle.isBusy }
-    /// 供设置页判断后台服务是否已安装（未安装时禁用“移除辅助服务…”）
-    var isHelperInstalled: Bool { helperLifecycle.installedState != .notInstalled }
+    /// 是否检测到旧版 BatteryBar 后台服务残留（com.batterybar.helper）
+    var hasLegacyHelperInstalled: Bool { helperLifecycle.legacyHelperInstalled }
+    /// 供设置页判断后台服务是否已安装（含旧版 BatteryBar 残留；均未安装时禁用“移除辅助服务…”）
+    var isHelperInstalled: Bool {
+        helperLifecycle.installedState != .notInstalled || helperLifecycle.legacyHelperInstalled
+    }
 
     @ObservationIgnored private var isComponentPowerSampleInFlight = false
     @ObservationIgnored private let helperClient = HelperClient()
@@ -937,7 +946,7 @@ final class PowerSampler {
             pluggedIn: isPluggedIn,
             isCharging: ps.isCharging,
             level: ps.level,
-            targetPercent: effectivePolicy.targetPercent,
+            targetPercent: effectivePolicy.completionNotificationTargetPercent,
             policyRevision: chargePolicyRevision
         ) : nil
 
@@ -1027,7 +1036,7 @@ final class PowerSampler {
             chargePolicySnapshot = effectivePolicy
             recalculateEstimates()
         }
-        if let targetPercent = effectivePolicy.targetPercent,
+        if let targetPercent = effectivePolicy.completionNotificationTargetPercent,
            NotificationPolicy.shouldSendFullCharge(
             level: level,
             externalConnected: externalConnected,

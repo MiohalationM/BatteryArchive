@@ -84,6 +84,67 @@ import Testing
         )
         #expect(abs(energy - 0.1667) < 1e-9)
     }
+
+    /// 48 秒达标分钟（coverage = 0.8）的有效时长为 48.0 秒（显示为 "<1m"），
+    /// 并验证同窗口按高覆盖率优先、同覆盖率按较晚 timestamp 去重与均值/峰值/低值计算。
+    @Test func systemPowerSummaryUsesExactEffectiveSecondsAndDeduplicatesWindows() throws {
+        let rangeEnd = rangeStart.addingTimeInterval(600)
+
+        var single = aggregateSnapshot(
+            windowStart: rangeStart.addingTimeInterval(60),
+            coverage: 0.8,
+            energyWh: 10.0 * 48.0 / 3600.0
+        )
+        single.systemPowerAverage = 10
+        single.systemPowerPeak = 14
+        let singleSummary = try #require(RangeStatistics.systemPowerSummary(
+            snapshots: [single], rangeStart: rangeStart, rangeEnd: rangeEnd
+        ))
+        #expect(singleSummary.usableMinuteCount == 1)
+        #expect(abs(singleSummary.effectiveSeconds - 48.0) < 1e-9)
+        #expect(UsageTimeFormat.duration(singleSummary.effectiveSeconds) == "<1m")
+        #expect(abs(singleSummary.averageWatts - 10.0) < 1e-9)
+        #expect(abs(singleSummary.peakWatts - 14.0) < 1e-9)
+        #expect(singleSummary.lowWatts == 10)
+
+        // 同窗口冲突：更高 coverage 优先；同 coverage 取较晚 timestamp
+        let w1 = rangeStart.addingTimeInterval(60)
+        var w1LowCov = aggregateSnapshot(windowStart: w1, coverage: 0.8, energyWh: 99)
+        w1LowCov.systemPowerAverage = 99
+        w1LowCov.systemPowerPeak = 99
+
+        var w1HighEarly = aggregateSnapshot(windowStart: w1, coverage: 1.0, energyWh: 50)
+        w1HighEarly.timestamp = w1.addingTimeInterval(55)
+        w1HighEarly.systemPowerAverage = 50
+        w1HighEarly.systemPowerPeak = 50
+
+        var w1HighLate = aggregateSnapshot(windowStart: w1, coverage: 1.0, energyWh: 12.0 * 60.0 / 3600.0)
+        w1HighLate.timestamp = w1.addingTimeInterval(60)
+        w1HighLate.systemPowerAverage = 12
+        w1HighLate.systemPowerPeak = 18
+
+        let w2 = rangeStart.addingTimeInterval(120)
+        var w2Good = aggregateSnapshot(windowStart: w2, coverage: 0.8, energyWh: 6.0 * 48.0 / 3600.0)
+        w2Good.systemPowerAverage = 6
+        w2Good.systemPowerPeak = 8
+
+        var belowThreshold = aggregateSnapshot(windowStart: rangeStart.addingTimeInterval(180), coverage: 0.79, energyWh: 99)
+        belowThreshold.systemPowerAverage = 99
+        var outOfRange = aggregateSnapshot(windowStart: rangeEnd, coverage: 1.0, energyWh: 99)
+        outOfRange.systemPowerAverage = 99
+
+        let multiSummary = try #require(RangeStatistics.systemPowerSummary(
+            snapshots: [w1LowCov, w1HighLate, w1HighEarly, w2Good, belowThreshold, outOfRange],
+            rangeStart: rangeStart,
+            rangeEnd: rangeEnd
+        ))
+        #expect(multiSummary.usableMinuteCount == 2)
+        #expect(abs(multiSummary.effectiveSeconds - 108.0) < 1e-9)
+        let expectedAvg = (12.0 * 60.0 + 6.0 * 48.0) / 108.0
+        #expect(abs(multiSummary.averageWatts - expectedAvg) < 1e-9)
+        #expect(abs(multiSummary.peakWatts - 18.0) < 1e-9)
+        #expect(multiSummary.lowWatts == 6)
+    }
 }
 
 /// 健康口径选择反例：系统值永远优先；容量比只是估算回退；全缺不可用。

@@ -296,4 +296,119 @@ import Testing
         #expect(shared(80, 4))
         #expect(!shared(80, 5)) // 上限策略在充电期间改动
     }
+
+    @Test("确认无上限（.noActiveLimit）观察到充电至 100% 停充时触发充满提醒，已满接电不误报")
+    func noActiveLimitFiresOnObservedFullChargeAndBlocksAlreadyFullPlugIn() throws {
+        let policy = ChargePolicyParser.parse(
+            .init(stdout: "No battery level limits set\n", exitCode: 0),
+            readAt: now
+        )
+        #expect(policy.status == .noActiveLimit)
+        #expect(policy.targetPercent == nil)
+        let target = try #require(policy.completionNotificationTargetPercent)
+        #expect(target == 100)
+
+        // 正常场景：接电开始充电（98%）→ 充到 100% 停充
+        var tracker = ChargeCompletionTracker()
+        let baseline = tracker.observe(pluggedIn: false, isCharging: false, level: 98, targetPercent: target, policyRevision: 1)
+        #expect(baseline == nil)
+        let started = tracker.observe(pluggedIn: true, isCharging: true, level: 98, targetPercent: target, policyRevision: 1)
+        #expect(started == nil)
+        let observedCompletion = tracker.observe(pluggedIn: true, isCharging: false, level: 100, targetPercent: target, policyRevision: 1)
+        let evidence = try #require(observedCompletion)
+        #expect(evidence == ChargeCompletionEvidence(targetPercent: 100, policyRevision: 1, startLevel: 98))
+        #expect(NotificationPolicy.shouldSendFullCharge(
+            level: 100,
+            externalConnected: true,
+            wasCharging: true,
+            isCharging: false,
+            targetPercent: target,
+            completionEvidence: evidence,
+            policyRevision: 1,
+            fullChargeEnabled: true,
+            permissionValid: true,
+            lastNotificationAt: nil,
+            now: now
+        ))
+
+        // 反例：已满 100% 时直接接电，无 charging -> stopped 过渡，绝不误报
+        var alreadyFullTracker = ChargeCompletionTracker()
+        let alreadyFullBaseline = alreadyFullTracker.observe(pluggedIn: false, isCharging: false, level: 100, targetPercent: target, policyRevision: 1)
+        #expect(alreadyFullBaseline == nil)
+        let alreadyFullEvidence = alreadyFullTracker.observe(
+            pluggedIn: true, isCharging: false, level: 100, targetPercent: target, policyRevision: 1
+        )
+        #expect(alreadyFullEvidence == nil)
+        #expect(!NotificationPolicy.shouldSendFullCharge(
+            level: 100,
+            externalConnected: true,
+            wasCharging: false,
+            isCharging: false,
+            targetPercent: target,
+            completionEvidence: alreadyFullEvidence,
+            policyRevision: 1,
+            fullChargeEnabled: true,
+            permissionValid: true,
+            lastNotificationAt: nil,
+            now: now
+        ))
+    }
+
+    @Test("策略过期/不可用/未知/冲突时 completionNotificationTargetPercent 为 nil 且永不触发提醒")
+    func uncertainPoliciesNeverFireFullChargeNotification() {
+        let ttl: TimeInterval = 900
+        let noLimit = ChargePolicyParser.parse(.init(stdout: "No battery level limits set\n", exitCode: 0), readAt: now)
+        let stale = noLimit.expiring(at: now.addingTimeInterval(ttl), ttl: ttl)
+        let unavailable = ChargePolicySnapshot.unavailable(readAt: now)
+        let unknown = ChargePolicyParser.parse(.init(stdout: "Battery level limits: <unknown>", exitCode: 0), readAt: now)
+        let conflict = ChargePolicyParser.parse(.init(stdout: """
+        Battery level limits:
+        (
+            { Terminated = 0; chargeSocLimitReason = manualChargeLimit; chargeSocLimitSoc = 80; },
+            { Terminated = 0; chargeSocLimitReason = manualChargeLimit; chargeSocLimitSoc = 90; }
+        )
+        """, exitCode: 0), readAt: now)
+
+        for policy in [stale, unavailable, unknown, conflict] {
+            #expect(policy.completionNotificationTargetPercent == nil)
+            var tracker = ChargeCompletionTracker()
+            _ = tracker.observe(pluggedIn: false, isCharging: false, level: 98, targetPercent: policy.completionNotificationTargetPercent, policyRevision: 2)
+            _ = tracker.observe(pluggedIn: true, isCharging: true, level: 98, targetPercent: policy.completionNotificationTargetPercent, policyRevision: 2)
+            let evidence = tracker.observe(pluggedIn: true, isCharging: false, level: 100, targetPercent: policy.completionNotificationTargetPercent, policyRevision: 2)
+            #expect(evidence == nil)
+            #expect(!NotificationPolicy.shouldSendFullCharge(
+                level: 100,
+                externalConnected: true,
+                wasCharging: true,
+                isCharging: false,
+                targetPercent: policy.completionNotificationTargetPercent,
+                completionEvidence: evidence,
+                policyRevision: 2,
+                fullChargeEnabled: true,
+                permissionValid: true,
+                lastNotificationAt: nil,
+                now: now
+            ))
+        }
+
+        // 起充时确认无上限，但停充瞬间策略已过期（stale）→ 同样阻断提醒
+        var expiringTracker = ChargeCompletionTracker()
+        _ = expiringTracker.observe(pluggedIn: false, isCharging: false, level: 98, targetPercent: noLimit.completionNotificationTargetPercent, policyRevision: 3)
+        _ = expiringTracker.observe(pluggedIn: true, isCharging: true, level: 98, targetPercent: noLimit.completionNotificationTargetPercent, policyRevision: 3)
+        let expiredEvidence = expiringTracker.observe(pluggedIn: true, isCharging: false, level: 100, targetPercent: stale.completionNotificationTargetPercent, policyRevision: 3)
+        #expect(expiredEvidence == nil)
+        #expect(!NotificationPolicy.shouldSendFullCharge(
+            level: 100,
+            externalConnected: true,
+            wasCharging: true,
+            isCharging: false,
+            targetPercent: stale.completionNotificationTargetPercent,
+            completionEvidence: expiredEvidence,
+            policyRevision: 3,
+            fullChargeEnabled: true,
+            permissionValid: true,
+            lastNotificationAt: nil,
+            now: now
+        ))
+    }
 }

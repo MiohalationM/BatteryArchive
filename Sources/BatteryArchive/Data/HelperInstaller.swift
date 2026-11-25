@@ -8,6 +8,7 @@ private let helperInstallerLogger = Logger(subsystem: "com.batteryarchive", cate
 /// Disk/signature checks and explicit privileged operations. No sampling or XPC.
 struct HelperInstaller: Sendable {
     static let helperIdentifier = "com.batteryarchive.helper"
+    static let legacyHelperIdentifier = "com.batterybar.helper"
 
     func installedState() -> InstalledHelperState {
         Self.installedState(
@@ -15,6 +16,26 @@ struct HelperInstaller: Sendable {
             plistExists: FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/\(Self.helperIdentifier).plist"),
             needsUpdate: dormantInstalledHelperNeedsUpdate()
         )
+    }
+
+    func hasLegacyHelperInstalled() -> Bool {
+        Self.hasLegacyHelperInstalled(
+            binaryExists: FileManager.default.fileExists(atPath: "/Library/PrivilegedHelperTools/\(Self.legacyHelperIdentifier)"),
+            plistExists: FileManager.default.fileExists(atPath: "/Library/LaunchDaemons/\(Self.legacyHelperIdentifier).plist")
+        )
+    }
+
+    static func hasLegacyHelperInstalled(binaryExists: Bool, plistExists: Bool) -> Bool {
+        binaryExists || plistExists
+    }
+
+    static func needsUninstall(
+        binaryExists: Bool,
+        plistExists: Bool,
+        legacyBinaryExists: Bool,
+        legacyPlistExists: Bool
+    ) -> Bool {
+        binaryExists || plistExists || legacyBinaryExists || legacyPlistExists
     }
 
     static func installedState(binaryExists: Bool, plistExists: Bool,
@@ -25,11 +46,11 @@ struct HelperInstaller: Sendable {
     }
 
     /// 安装 helper（首次需要管理员密码，app 内自动触发）
-    /// 如果已安装但版本旧，也会触发重新安装；`force == true` 时即便磁盘文件一致也重新 bootstrap launchd。
+    /// 如果已安装但版本旧，或检测到旧版 BatteryBar 后台服务残留，也会触发重新安装；`force == true` 时即便磁盘文件一致也重新 bootstrap launchd。
     @discardableResult
     func installHelperIfNeeded(force: Bool = false) -> Bool {
-        // 已安装且版本匹配，无需操作
-        if !force, installedState() == .current { return true }
+        // 已安装且版本匹配且无旧版残留，无需操作
+        if !force, installedState() == .current, !hasLegacyHelperInstalled() { return true }
 
         let helperPath: String
         if let bundledPath = validatedBundledHelperPath() {
@@ -123,6 +144,8 @@ struct HelperInstaller: Sendable {
     /bin/chmod 755 "$stage/helper"
     /bin/chmod 644 "$stage/daemon.plist"
     /bin/launchctl bootout system/com.batteryarchive.helper 2>/dev/null || true
+    /bin/launchctl bootout system/com.batterybar.helper 2>/dev/null || true
+    /bin/rm -f /Library/PrivilegedHelperTools/com.batterybar.helper /Library/LaunchDaemons/com.batterybar.helper.plist
     /bin/mv -fh "$stage/helper" "$destination"
     /bin/mv -fh "$stage/daemon.plist" "$plistDestination"
     /bin/launchctl bootstrap system/ "$plistDestination"
@@ -234,33 +257,45 @@ struct HelperInstaller: Sendable {
         return false
     }
 
-    /// 卸载 helper：bootout 停止 root 守护进程并删除二进制与 plist（弹一次管理员密码框）。
+    static var uninstallAppleScript: String {
+        """
+        on run argv
+            set shellCommand to "(/bin/launchctl bootout " & quoted form of (item 1 of argv) & " 2>/dev/null || true) && (/bin/launchctl bootout " & quoted form of (item 4 of argv) & " 2>/dev/null || true) && /bin/rm -f " & quoted form of (item 2 of argv) & " " & quoted form of (item 3 of argv) & " " & quoted form of (item 5 of argv) & " " & quoted form of (item 6 of argv)
+            do shell script shellCommand with administrator privileges with prompt (item 7 of argv)
+        end run
+        """
+    }
+
+    /// 卸载 helper：一次管理员授权同时 bootout 并清理当前 BatteryArchive 与旧版 BatteryBar 后台服务及 plist。
     /// 返回 false 表示用户取消密码框或卸载失败（守护进程保留，但 app 侧不再调用；
     /// helper 4.0 起 powermetrics 有 60s 空闲自停，保留也不产生持续开销）。
     @discardableResult
     func uninstallHelper() -> Bool {
         let installPath = "/Library/PrivilegedHelperTools/\(Self.helperIdentifier)"
         let plistPath = "/Library/LaunchDaemons/\(Self.helperIdentifier).plist"
+        let legacyInstallPath = "/Library/PrivilegedHelperTools/\(Self.legacyHelperIdentifier)"
+        let legacyPlistPath = "/Library/LaunchDaemons/\(Self.legacyHelperIdentifier).plist"
 
-        // 已不在则无需提权
-        guard FileManager.default.fileExists(atPath: installPath)
-            || FileManager.default.fileExists(atPath: plistPath) else {
+        // 当前与旧版均不在则无需提权
+        guard Self.needsUninstall(
+            binaryExists: FileManager.default.fileExists(atPath: installPath),
+            plistExists: FileManager.default.fileExists(atPath: plistPath),
+            legacyBinaryExists: FileManager.default.fileExists(atPath: legacyInstallPath),
+            legacyPlistExists: FileManager.default.fileExists(atPath: legacyPlistPath)
+        ) else {
             return true
         }
 
-        let script = """
-        on run argv
-            set shellCommand to "(/bin/launchctl bootout " & quoted form of (item 1 of argv) & " 2>/dev/null || true) && /bin/rm -f " & quoted form of (item 2 of argv) & " " & quoted form of (item 3 of argv)
-            do shell script shellCommand with administrator privileges with prompt (item 4 of argv)
-        end run
-        """
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         task.arguments = [
-            "-e", script, "--",
+            "-e", Self.uninstallAppleScript, "--",
             "system/\(Self.helperIdentifier)",
             installPath,
             plistPath,
+            "system/\(Self.legacyHelperIdentifier)",
+            legacyInstallPath,
+            legacyPlistPath,
             "\(AppBrand.displayName)需要移除后台服务",
         ]
         task.standardOutput = FileHandle.nullDevice

@@ -49,7 +49,7 @@ struct ChargePolicySnapshot: Equatable {
     }
 
     /// 充电时间估算目标：已配置上限用 `targetPercent`，明确无上限（`.noActiveLimit`）用 `100`，
-    /// 冲突/未知/不可用/过期保持 `nil`；不改变 `targetPercent` 原有完成提醒语义。
+    /// 冲突/未知/不可用/过期保持 `nil`；不改变 `targetPercent` 在 UI 中的展示语义。
     var chargingEstimateTargetPercent: Int? {
         switch status {
         case .configured:
@@ -59,6 +59,12 @@ struct ChargePolicySnapshot: Equatable {
         case .conflictingPolicies, .unknownPolicy, .unavailable, .stale:
             nil
         }
+    }
+
+    /// 充满/到达上限提醒目标：已配置上限用 `targetPercent`，明确无上限（`.noActiveLimit`）用 `100`，
+    /// 冲突/未知/不可用/过期保持 `nil`（不猜测上限，也不把 `.noActiveLimit` 写回 `targetPercent`）。
+    var completionNotificationTargetPercent: Int? {
+        chargingEstimateTargetPercent
     }
 
     static func shouldRefresh(lastReadAt: Date?, now: Date, ttl: TimeInterval) -> Bool {
@@ -410,7 +416,9 @@ final class ChargePolicyMonitor {
         expirationTask?.cancel()
         expirationTask = nil
         guard !isStopped else { return }
-        guard let readAt = rawSnapshot.readAt, rawSnapshot.status == .configured else { return }
+        guard let readAt = rawSnapshot.readAt,
+              rawSnapshot.status == .configured || rawSnapshot.status == .noActiveLimit
+        else { return }
         let expireAt = readAt.addingTimeInterval(Self.cacheTTL)
         let remaining = expireAt.timeIntervalSince(now)
         guard remaining > 0 else {

@@ -190,6 +190,30 @@ import TelemetryCore
         #expect(String(script[start.upperBound..<end.lowerBound]) == HelperInstaller.installShellScript)
     }
 
+    @Test func legacyHelperDetectionAndCleanupContract() {
+        #expect(HelperInstaller.legacyHelperIdentifier == "com.batterybar.helper")
+
+        #expect(HelperInstaller.hasLegacyHelperInstalled(binaryExists: false, plistExists: false) == false)
+        #expect(HelperInstaller.hasLegacyHelperInstalled(binaryExists: true, plistExists: false) == true)
+        #expect(HelperInstaller.hasLegacyHelperInstalled(binaryExists: false, plistExists: true) == true)
+        #expect(HelperInstaller.hasLegacyHelperInstalled(binaryExists: true, plistExists: true) == true)
+
+        #expect(HelperInstaller.needsUninstall(binaryExists: false, plistExists: false, legacyBinaryExists: false, legacyPlistExists: false) == false)
+        #expect(HelperInstaller.needsUninstall(binaryExists: true, plistExists: false, legacyBinaryExists: false, legacyPlistExists: false) == true)
+        #expect(HelperInstaller.needsUninstall(binaryExists: false, plistExists: true, legacyBinaryExists: false, legacyPlistExists: false) == true)
+        #expect(HelperInstaller.needsUninstall(binaryExists: false, plistExists: false, legacyBinaryExists: true, legacyPlistExists: false) == true)
+        #expect(HelperInstaller.needsUninstall(binaryExists: false, plistExists: false, legacyBinaryExists: false, legacyPlistExists: true) == true)
+
+        #expect(HelperInstaller.installShellScript.contains("/bin/launchctl bootout system/com.batterybar.helper 2>/dev/null || true"))
+        #expect(HelperInstaller.installShellScript.contains("/bin/rm -f /Library/PrivilegedHelperTools/com.batterybar.helper /Library/LaunchDaemons/com.batterybar.helper.plist"))
+
+        let uninstallScript = HelperInstaller.uninstallAppleScript
+        #expect(uninstallScript.components(separatedBy: "with administrator privileges").count == 2)
+        for index in 1...7 {
+            #expect(uninstallScript.contains("item \(index) of argv"))
+        }
+    }
+
     @Test func verifiedStagedBytesSurviveSourceReplacement() throws {
         try runStagingTest(validHash: true)
     }

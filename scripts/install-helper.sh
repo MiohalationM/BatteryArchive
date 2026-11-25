@@ -64,6 +64,8 @@ test "${actual%% *}" = "$expected"
 /bin/chmod 755 "$stage/helper"
 /bin/chmod 644 "$stage/daemon.plist"
 /bin/launchctl bootout system/com.batteryarchive.helper 2>/dev/null || true
+/bin/launchctl bootout system/com.batterybar.helper 2>/dev/null || true
+/bin/rm -f /Library/PrivilegedHelperTools/com.batterybar.helper /Library/LaunchDaemons/com.batterybar.helper.plist
 /bin/mv -fh "$stage/helper" "$destination"
 /bin/mv -fh "$stage/daemon.plist" "$plistDestination"
 /bin/launchctl bootstrap system/ "$plistDestination"

@@ -125,7 +125,7 @@ struct OverviewView: View {
 private struct TodayPowerSummary: Equatable, Sendable {
     var averageWatts: Double?
     var peakWatts: Double?
-    var usableMinutes: Int = 0
+    var effectiveSeconds: TimeInterval = 0
 }
 
 private struct TodayPowerCard: View {
@@ -173,9 +173,9 @@ private struct TodayPowerCard: View {
                             tint: .bbAmber
                         )
                     }
-                    if summary.usableMinutes > 0 {
+                    if summary.effectiveSeconds > 0 {
                         StatusPillBadge(
-                            text: "已记录 \(UsageTimeFormat.duration(Double(summary.usableMinutes * 60)))",
+                            text: "已记录 \(UsageTimeFormat.duration(summary.effectiveSeconds))",
                             tint: .bbBlue
                         )
                     }
@@ -228,44 +228,22 @@ private struct TodayPowerCard: View {
         let dayStart = calendar.startOfDay(for: now)
         guard now > dayStart else { return TodayPowerSummary() }
 
-        var uniqueByWindow: [Date: BatterySnapshot] = [:]
-        for snap in source {
-            guard let windowStart = snap.aggregateWindowStart,
-                  windowStart >= dayStart, windowStart < now else { continue }
-            if let existing = uniqueByWindow[windowStart] {
-                let newCov = snap.systemCoverage ?? 0
-                let oldCov = existing.systemCoverage ?? 0
-                if newCov > oldCov || (newCov == oldCov && snap.timestamp > existing.timestamp) {
-                    uniqueByWindow[windowStart] = snap
-                }
-            } else {
-                uniqueByWindow[windowStart] = snap
-            }
-        }
-
-        let usable = uniqueByWindow.values.filter {
-            guard let cov = $0.systemCoverage, cov.isFinite, cov >= 0.8,
-                  let avg = $0.systemPowerAverage, avg.isFinite,
-                  let wh = $0.systemEnergyWh, wh.isFinite, wh >= 0 else { return false }
-            return true
-        }
-
-        if !usable.isEmpty {
-            let totalWh = RangeStatistics.trustedSystemEnergyWh(
-                snapshots: source, rangeStart: dayStart, rangeEnd: now
-            )
-            let effectiveHours = usable.reduce(0.0) { $0 + (($1.systemCoverage ?? 0) * 60 / 3_600) }
-            guard effectiveHours > 0 else { return TodayPowerSummary() }
-            let average = totalWh / effectiveHours
-            let peak = usable.compactMap(\.systemPowerPeak).filter(\.isFinite).max() ?? average
+        if let summary = RangeStatistics.systemPowerSummary(
+            snapshots: source,
+            rangeStart: dayStart,
+            rangeEnd: now
+        ) {
             return TodayPowerSummary(
-                averageWatts: average,
-                peakWatts: max(peak, average),
-                usableMinutes: usable.count
+                averageWatts: summary.averageWatts,
+                peakWatts: summary.peakWatts,
+                effectiveSeconds: summary.effectiveSeconds
             )
         }
 
-        let hasAnyAggregateToday = !uniqueByWindow.isEmpty
+        let hasAnyAggregateToday = source.contains {
+            guard let windowStart = $0.aggregateWindowStart else { return false }
+            return windowStart >= dayStart && windowStart < now
+        }
         guard !hasAnyAggregateToday else { return TodayPowerSummary() }
 
         // 无分钟聚合时的旧快照回退（仅统计可信系统负载）
@@ -278,7 +256,7 @@ private struct TodayPowerCard: View {
         return TodayPowerSummary(
             averageWatts: sum / Double(legacy.count),
             peakWatts: peak,
-            usableMinutes: legacy.count
+            effectiveSeconds: Double(legacy.count * 60)
         )
     }
 }
@@ -406,7 +384,7 @@ struct RuntimeSummary: View {
                     at: Date(), ttl: ChargePolicyMonitor.cacheTTL
                 )
                 let chargingGoal = effectivePolicy.chargingEstimateTargetPercent
-                if let estimate = sampler.chargeEstimate ?? sampler.systemReportedChargeEstimate,
+                if let estimate = sampler.preferredChargeEstimate,
                    let goal = estimate.goalPercent {
                     let duration = UsageTimeFormat.duration(estimate.valueHours * 3_600)
                     let targetText = Int(goal) >= 100 ? "充满" : "达 \(Int(goal))%"

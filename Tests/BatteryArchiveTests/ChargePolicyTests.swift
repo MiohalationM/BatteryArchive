@@ -30,6 +30,7 @@ private final class ControllableClock: @unchecked Sendable {
 private final class ControllablePolicyRunner: ChargePolicyCommandRunning, @unchecked Sendable {
     private let lock = NSLock()
     private var target = 80
+    private var noActiveLimit = false
     private var reads = 0
     private var delaySeconds: TimeInterval = 0
     private var shouldFail = false
@@ -46,6 +47,13 @@ private final class ControllablePolicyRunner: ChargePolicyCommandRunning, @unche
         lock.lock()
         defer { lock.unlock() }
         self.target = target
+        self.noActiveLimit = false
+    }
+
+    func setNoActiveLimit(_ enabled: Bool) {
+        lock.lock()
+        defer { lock.unlock() }
+        self.noActiveLimit = enabled
     }
 
     func setDelay(_ delay: TimeInterval) {
@@ -75,6 +83,7 @@ private final class ControllablePolicyRunner: ChargePolicyCommandRunning, @unche
         let delay = delaySeconds
         let fail = shouldFail
         let currentTarget = target
+        let isNoLimit = noActiveLimit
         let gate = nextReadGate
         nextReadGate = nil
         lock.unlock()
@@ -87,6 +96,9 @@ private final class ControllablePolicyRunner: ChargePolicyCommandRunning, @unche
         }
         if fail {
             return .init(stdout: nil, exitCode: 1)
+        }
+        if isNoLimit {
+            return .init(stdout: "No battery level limits set\n", exitCode: 0)
         }
         return .init(stdout: """
         Battery level limits:
@@ -551,5 +563,69 @@ private final class DelayedChargePolicyRunner: ChargePolicyCommandRunning, @unch
         """)
         #expect(conflict.status == .conflictingPolicies)
         #expect(conflict.chargingEstimateTargetPercent == nil)
+    }
+
+    @Test("completionNotificationTargetPercent 在确认无上限时映射为 100 且不污染 targetPercent")
+    func completionNotificationTargetPercentCoversAllPolicyStatuses() {
+        for tier in ChargeLimitTarget.allCases {
+            let configured = parse(onePolicy(terminated: 0, target: tier.rawValue))
+            #expect(configured.targetPercent == tier.rawValue)
+            #expect(configured.completionNotificationTargetPercent == tier.rawValue)
+        }
+
+        let noLimit = parse("No battery level limits set\n")
+        #expect(noLimit.status == .noActiveLimit)
+        #expect(noLimit.targetPercent == nil)
+        #expect(noLimit.completionNotificationTargetPercent == 100)
+
+        let terminatedOnly = parse(onePolicy(terminated: 1, target: 80))
+        #expect(terminatedOnly.status == .noActiveLimit)
+        #expect(terminatedOnly.targetPercent == nil)
+        #expect(terminatedOnly.completionNotificationTargetPercent == 100)
+
+        let staleFromNoLimit = noLimit.expiring(at: now.addingTimeInterval(900), ttl: 900)
+        #expect(staleFromNoLimit.status == .stale)
+        #expect(staleFromNoLimit.targetPercent == nil)
+        #expect(staleFromNoLimit.completionNotificationTargetPercent == nil)
+
+        let unavailable = parse(liveDuplicateFixture, exitCode: 1)
+        #expect(unavailable.completionNotificationTargetPercent == nil)
+
+        let unknown = parse(onePolicy(reason: "futurePolicy", target: 80))
+        #expect(unknown.completionNotificationTargetPercent == nil)
+
+        let conflict = parse("""
+        Battery level limits:
+        (
+            { Terminated = 0; chargeSocLimitReason = manualChargeLimit; chargeSocLimitSoc = 80; },
+            { Terminated = 0; chargeSocLimitReason = manualChargeLimit; chargeSocLimitSoc = 85; }
+        )
+        """)
+        #expect(conflict.completionNotificationTargetPercent == nil)
+    }
+
+    @Test("确认无上限状态在 TTL 到期后转为 stale，且重新刷新同状态不破坏策略版本")
+    @MainActor func noActiveLimitExpiresAtTTLAndRecoversOnRefresh() async {
+        let clock = ControllableClock(now)
+        let runner = ControllablePolicyRunner()
+        runner.setNoActiveLimit(true)
+        let monitor = ChargePolicyMonitor(runner: runner, clock: { clock.now() })
+
+        monitor.refreshIfNeeded(now: clock.now())
+        await waitUntil { monitor.snapshot.status == .noActiveLimit }
+        let initialRevision = monitor.revision
+        #expect(monitor.snapshot.targetPercent == nil)
+        #expect(monitor.snapshot.completionNotificationTargetPercent == 100)
+
+        clock.set(now.addingTimeInterval(ChargePolicyMonitor.cacheTTL))
+        #expect(monitor.snapshot.status == .stale)
+        #expect(monitor.snapshot.completionNotificationTargetPercent == nil)
+
+        clock.advance(by: 1)
+        monitor.refreshIfNeeded(now: clock.now())
+        await waitUntil { runner.readCount == 2 && monitor.snapshot.status == .noActiveLimit }
+        #expect(monitor.snapshot.targetPercent == nil)
+        #expect(monitor.snapshot.completionNotificationTargetPercent == 100)
+        #expect(monitor.revision == initialRevision)
     }
 }

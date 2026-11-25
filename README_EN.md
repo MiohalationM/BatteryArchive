@@ -52,7 +52,7 @@
 
 ## Installation
 
-Requires **macOS 14.0 (Sonoma)** or later.
+Prebuilt Release DMGs require **macOS 14.0 (Sonoma) or later (Apple Silicon)**; Intel Mac users can build locally from source (see [Building from Source](#building-from-source) below).
 
 1. Download the latest `BatteryArchive-*.dmg` from [Releases](../../releases/latest).
 2. Open the DMG and drag **BatteryArchive** into your `Applications` folder.
@@ -77,7 +77,7 @@ Because open-source builds are ad-hoc signed (not Apple notarized), macOS may wa
 
 ## Building from Source
 
-Requires Xcode (Swift 6.2+), with zero third-party dependencies:
+Requires Xcode (Swift 6.2+), with zero third-party dependencies (can be built locally on both Apple Silicon and Intel Macs):
 
 ```bash
 swift test                    # Run unit tests

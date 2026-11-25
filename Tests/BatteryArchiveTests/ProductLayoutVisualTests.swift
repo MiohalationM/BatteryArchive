@@ -69,9 +69,11 @@ import Testing
       }
     }
 
-    /// Exercise the real shared views in a native compositor, without a sampler or store.
+    /// Render shared branded surfaces offscreen by default (no foreground window flashing);
+    /// set BA_RENDER_NATIVE_WINDOW=1 alongside BA_RENDER_PRODUCT_QA=1 to capture real NSWindow frames.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["BA_RENDER_PRODUCT_QA"] == "1"))
     @MainActor func brandedSurfacesInNativeWindow() async throws {
+      let useNativeWindow = ProcessInfo.processInfo.environment["BA_RENDER_NATIVE_WINDOW"] == "1"
       let root = URL(fileURLWithPath: #filePath)
         .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
       let output = root.appendingPathComponent(".build/qa-glass-brand")
@@ -79,11 +81,15 @@ import Testing
       let app = NSApplication.shared
       let previousIcon = app.applicationIconImage
       let previousPolicy = app.activationPolicy()
-      app.setActivationPolicy(.regular)
+      if useNativeWindow {
+        app.setActivationPolicy(.regular)
+      }
       app.applicationIconImage = NSImage(contentsOf: root.appendingPathComponent("Sources/BatteryArchive/Resources/AppIcon.png"))
       defer {
         app.applicationIconImage = previousIcon
-        app.setActivationPolicy(previousPolicy)
+        if useNativeWindow {
+          app.setActivationPolicy(previousPolicy)
+        }
       }
 
       let scenarios: [(String, BrandPreviewMode, Double, Double, ColorScheme)] = [
@@ -96,58 +102,68 @@ import Testing
         ("settings-light", .settings, 940.0, 660.0, .light),
       ]
 
-      for (name, mode, width, height, scheme) in scenarios {
-        let content = BrandOverviewFixture(mode: mode)
+      @MainActor func renderOffscreen(
+        name: String, mode: BrandPreviewMode, width: Double, height: Double, scheme: ColorScheme
+      ) throws {
+        let appearance = try #require(NSAppearance(named: scheme == .dark ? .darkAqua : .aqua))
+        let renderContent = BrandOverviewFixture(mode: mode, scrollable: false)
           .environment(\.colorScheme, scheme)
-          .frame(width: width, height: height)
-        let hosting = NSHostingView(rootView: content)
-        let window = NSWindow(
-          contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-          styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
-          backing: .buffered, defer: false)
-        window.isReleasedWhenClosed = false
-        window.title = "BatteryArchive · 视觉预览（示例数据）"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
-        window.contentView = hosting
-        window.center()
-        window.makeKeyAndOrderFront(nil)
-        app.activate(ignoringOtherApps: true)
-        defer { window.close() }
-        try await Task.sleep(for: .milliseconds(500))
-        hosting.layoutSubtreeIfNeeded()
-        #expect(window.titleVisibility == .hidden)
-        #expect(window.titlebarAppearsTransparent)
-        #expect(window.styleMask.contains(.fullSizeContentView))
-        #expect(abs(hosting.frame.height - window.frame.height) < 1)
-        for buttonType in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
-          let button = try #require(window.standardWindowButton(buttonType))
-          #expect(!button.isHidden)
+          .frame(width: width, height: height, alignment: .topLeading)
+          .clipped()
+        var cgImage: CGImage?
+        appearance.performAsCurrentDrawingAppearance {
+          let renderer = ImageRenderer(content: renderContent)
+          renderer.scale = 2
+          cgImage = renderer.cgImage
         }
-        let capture = Process()
-        capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        capture.arguments = ["-x", "-o", "-l", "\(window.windowNumber)",
-                             output.appendingPathComponent("\(name).png").path]
-        try capture.run()
-        capture.waitUntilExit()
-        if capture.terminationStatus != 0 {
-          // 命令行会话无屏幕录制 TCC 权限时，回退至同外观高分 ImageRenderer 导出视觉预览
-          let appearance = try #require(NSAppearance(named: scheme == .dark ? .darkAqua : .aqua))
-          let renderContent = BrandOverviewFixture(mode: mode, scrollable: false)
+        let rendered = try #require(cgImage)
+        let data = try #require(
+          NSBitmapImageRep(cgImage: rendered).representation(using: .png, properties: [:]))
+        try data.write(to: output.appendingPathComponent("\(name).png"))
+      }
+
+      for (name, mode, width, height, scheme) in scenarios {
+        if useNativeWindow {
+          let content = BrandOverviewFixture(mode: mode)
             .environment(\.colorScheme, scheme)
-            .frame(width: width, height: height, alignment: .topLeading)
-            .clipped()
-          var fallback: CGImage?
-          appearance.performAsCurrentDrawingAppearance {
-            let renderer = ImageRenderer(content: renderContent)
-            renderer.scale = 2
-            fallback = renderer.cgImage
+            .frame(width: width, height: height)
+          let hosting = NSHostingView(rootView: content)
+          let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+            backing: .buffered, defer: false)
+          window.isReleasedWhenClosed = false
+          window.title = "BatteryArchive · 视觉预览（示例数据）"
+          window.titleVisibility = .hidden
+          window.titlebarAppearsTransparent = true
+          window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+          window.contentView = hosting
+          window.center()
+          window.makeKeyAndOrderFront(nil)
+          app.activate(ignoringOtherApps: true)
+          defer { window.close() }
+          try await Task.sleep(for: .milliseconds(500))
+          hosting.layoutSubtreeIfNeeded()
+          #expect(window.titleVisibility == .hidden)
+          #expect(window.titlebarAppearsTransparent)
+          #expect(window.styleMask.contains(.fullSizeContentView))
+          #expect(abs(hosting.frame.height - window.frame.height) < 1)
+          for buttonType in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+            let button = try #require(window.standardWindowButton(buttonType))
+            #expect(!button.isHidden)
           }
-          let rendered = try #require(fallback)
-          let data = try #require(
-            NSBitmapImageRep(cgImage: rendered).representation(using: .png, properties: [:]))
-          try data.write(to: output.appendingPathComponent("\(name).png"))
+          let capture = Process()
+          capture.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+          capture.arguments = ["-x", "-o", "-l", "\(window.windowNumber)",
+                               output.appendingPathComponent("\(name).png").path]
+          try capture.run()
+          capture.waitUntilExit()
+          if capture.terminationStatus != 0 {
+            // 命令行会话无屏幕录制 TCC 权限时，回退至同外观高分 ImageRenderer 导出视觉预览
+            try renderOffscreen(name: name, mode: mode, width: width, height: height, scheme: scheme)
+          }
+        } else {
+          try renderOffscreen(name: name, mode: mode, width: width, height: height, scheme: scheme)
         }
         let image = try #require(NSImage(contentsOf: output.appendingPathComponent("\(name).png")))
         #expect(image.size.width >= width)

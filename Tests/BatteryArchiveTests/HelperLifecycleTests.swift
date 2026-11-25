@@ -15,6 +15,7 @@ import Testing
         private var _installResult = true
         private var _uninstallResult = true
         private var _installedState: InstalledHelperState = .notInstalled
+        private var _legacyHelperInstalled = false
 
         var installCount: Int {
             lock.lock(); defer { lock.unlock() }; return _installCount
@@ -34,6 +35,10 @@ import Testing
             get { lock.lock(); defer { lock.unlock() }; return _installedState }
             set { lock.lock(); _installedState = newValue; lock.unlock() }
         }
+        var legacyHelperInstalled: Bool {
+            get { lock.lock(); defer { lock.unlock() }; return _legacyHelperInstalled }
+            set { lock.lock(); _legacyHelperInstalled = newValue; lock.unlock() }
+        }
 
         func installOrUpdate() async -> Bool {
             incrementInstall()
@@ -45,6 +50,9 @@ import Testing
         }
         func installedHelperState() async -> InstalledHelperState {
             installedState
+        }
+        func hasLegacyHelperInstalled() async -> Bool {
+            legacyHelperInstalled
         }
 
         // NSLock.lock() 在 async 上下文不可用；计数变更收敛到同步辅助方法
@@ -369,5 +377,63 @@ import Testing
             isStarted: false,
             isPowerPageVisible: true
         ) == false)
+    }
+
+    @MainActor
+    @Test("启动检查可识别旧版 BatteryBar 后台服务残留且不触发安装或卸载")
+    func startupDetectsLegacyHelperWithoutPrivilegedOperations() async {
+        let stub = StubOps()
+        stub.installedState = .notInstalled
+        stub.legacyHelperInstalled = true
+        let controller = makeController(stub)
+
+        let state = await controller.refreshAtStartup(enabled: false)
+        #expect(state == .disabled)
+        #expect(controller.installedState == .notInstalled)
+        #expect(controller.legacyHelperInstalled == true)
+        #expect(stub.installCount == 0)
+        #expect(stub.uninstallCount == 0)
+    }
+
+    @MainActor
+    @Test("启用成功清除旧版残留标记，失败则保留残留标记")
+    func enableClearsLegacyHelperFlagOnlyOnSuccess() async {
+        let stub = StubOps()
+        stub.installedState = .notInstalled
+        stub.legacyHelperInstalled = true
+        stub.installResult = false
+        let controller = makeController(stub)
+        _ = await controller.refreshAtStartup(enabled: false)
+        #expect(controller.legacyHelperInstalled == true)
+
+        #expect(await controller.beginEnable() == false)
+        #expect(controller.legacyHelperInstalled == true)
+
+        stub.installResult = true
+        #expect(await controller.beginEnable() == true)
+        #expect(controller.installedState == .current)
+        #expect(controller.legacyHelperInstalled == false)
+        #expect(controller.state == .enabled)
+    }
+
+    @MainActor
+    @Test("移除成功清除旧版残留标记，失败则保留残留标记")
+    func removeClearsLegacyHelperFlagOnlyOnSuccess() async {
+        let stub = StubOps()
+        stub.installedState = .notInstalled
+        stub.legacyHelperInstalled = true
+        stub.uninstallResult = false
+        let controller = makeController(stub)
+        _ = await controller.refreshAtStartup(enabled: false)
+        #expect(controller.legacyHelperInstalled == true)
+
+        #expect(await controller.remove() == false)
+        #expect(controller.legacyHelperInstalled == true)
+
+        stub.uninstallResult = true
+        #expect(await controller.remove() == true)
+        #expect(controller.installedState == .notInstalled)
+        #expect(controller.legacyHelperInstalled == false)
+        #expect(controller.state == .disabled)
     }
 }

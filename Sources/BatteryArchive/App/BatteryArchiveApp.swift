@@ -3,18 +3,18 @@ import AppKit
 import Darwin
 
 @main
-struct BatteryArchiveApp: App {
-    @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+@MainActor
+enum BatteryArchiveApp {
+    private static var retainedDelegate: AppDelegate?
 
-    var body: some Scene {
-        // 菜单栏常驻应用：不声明 WindowGroup，避免启动时预创建隐藏主窗口与冗余窗口状态；
-        // 主窗口、Popover 与关于窗口全部由 AppDelegate 按需创建并在关闭时彻底释放。
-        Settings {
-            EmptyView()
-        }
+    static func main() {
+        let app = NSApplication.shared
+        let delegate = AppDelegate()
+        retainedDelegate = delegate
+        app.delegate = delegate
+        app.setActivationPolicy(.accessory)
+        app.run()
     }
-
-    // 图标由 Info.plist 声明的正式资源提供，不覆盖系统 applicationIconImage。
 }
 
 /// AppDelegate — 状态栏（左键 Popover / 右键菜单）、开机自启与按需窗口生命周期管理。
@@ -61,6 +61,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        setupMainMenu()
         sampler.start()
         usageObserver = NotificationCenter.default.addObserver(
             forName: .batteryUsageDidChange, object: nil, queue: .main
@@ -137,6 +138,79 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
             self?.refreshTitle()
         }
+    }
+
+    private func setupMainMenu() {
+        let mainMenu = NSMenu()
+
+        let appMenuItem = NSMenuItem()
+        let appMenu = NSMenu(title: AppBrand.displayName)
+        let aboutItem = appMenu.addItem(
+            withTitle: "关于 \(AppBrand.displayName)",
+            action: #selector(showAbout(_:)),
+            keyEquivalent: ""
+        )
+        aboutItem.target = self
+        appMenu.addItem(.separator())
+        let settingsItem = appMenu.addItem(
+            withTitle: "设置…",
+            action: #selector(openSettingsFromMenu(_:)),
+            keyEquivalent: ","
+        )
+        settingsItem.target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "隐藏 \(AppBrand.displayName)",
+            action: #selector(NSApplication.hide(_:)),
+            keyEquivalent: "h"
+        )
+        let hideOthersItem = appMenu.addItem(
+            withTitle: "隐藏其他",
+            action: #selector(NSApplication.hideOtherApplications(_:)),
+            keyEquivalent: "h"
+        )
+        hideOthersItem.keyEquivalentModifierMask = [.command, .option]
+        appMenu.addItem(
+            withTitle: "全部显示",
+            action: #selector(NSApplication.unhideAllApplications(_:)),
+            keyEquivalent: ""
+        )
+        appMenu.addItem(.separator())
+        appMenu.addItem(
+            withTitle: "退出 \(AppBrand.displayName)",
+            action: #selector(NSApplication.terminate(_:)),
+            keyEquivalent: "q"
+        )
+        appMenuItem.submenu = appMenu
+        mainMenu.addItem(appMenuItem)
+
+        let editMenuItem = NSMenuItem()
+        let editMenu = NSMenu(title: "编辑")
+        editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
+        let redoItem = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "z")
+        redoItem.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "剪切", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "拷贝", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+        editMenuItem.submenu = editMenu
+        mainMenu.addItem(editMenuItem)
+
+        let windowMenuItem = NSMenuItem()
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenuItem.submenu = windowMenu
+        mainMenu.addItem(windowMenuItem)
+
+        NSApp.mainMenu = mainMenu
+        NSApp.windowsMenu = windowMenu
+    }
+
+    @objc private func openSettingsFromMenu(_ sender: Any?) {
+        navigation.go(.settings)
+        presentMainWindow()
     }
 
     private func refreshUsageReport() {
