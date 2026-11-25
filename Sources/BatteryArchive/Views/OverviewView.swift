@@ -77,8 +77,6 @@ struct OverviewView: View {
             Text(durationText)
                 .font(BBType.metricLarge.monospacedDigit())
                 .foregroundStyle(Color.bbInk)
-                .contentTransition(.numericText())
-                .animation(reduceMotion ? nil : ProductMotion.reading, value: durationText)
 
             VStack(alignment: .leading, spacing: 7) {
                 if hasEvidence && totalBattery > 0 {
@@ -95,7 +93,6 @@ struct OverviewView: View {
                                     .fill(Color.bbSlateBlue.opacity(0.65))
                             }
                         }
-                        .animation(reduceMotion ? nil : ProductMotion.reading, value: onRatio)
                     }
                     .frame(height: 6)
 
@@ -157,8 +154,6 @@ private struct TodayPowerCard: View {
                 Text(averageText)
                     .font(BBType.metricLarge.monospacedDigit())
                     .foregroundStyle(Color.bbInk)
-                    .contentTransition(.numericText())
-                    .animation(reduceMotion ? nil : ProductMotion.reading, value: averageText)
                 if hasData {
                     Text("W")
                         .font(BBType.bodyMedium)

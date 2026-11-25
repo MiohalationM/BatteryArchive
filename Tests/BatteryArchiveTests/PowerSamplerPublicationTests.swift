@@ -5,13 +5,13 @@ import Testing
 @Suite @MainActor struct PowerSamplerPublicationTests {
     private let t0 = Date(timeIntervalSince1970: 1_800_000_000)
 
-    private func reading(at date: Date, batteryPower: Double = 12,
+    private func reading(at date: Date, systemPower: Double = 13, batteryPower: Double = 12,
                          inputPower: Double = 25, temperature: Double = 30) -> BatteryReader.BatteryReading {
         let info = BatteryInfo(
             designCapacity: 4000, maxCapacity: 3800, cycleCount: 10,
             voltage: 11500, instantAmperage: 1000, temperature: temperature,
             isCharging: true, externalConnected: true, chargeStatus: nil,
-            systemPower: 13, batteryPower: batteryPower, batteryPowerAvailable: true,
+            systemPower: systemPower, batteryPower: batteryPower, batteryPowerAvailable: true,
             adapterInputPower: inputPower, adapterInputPowerAvailable: true,
             systemPowerAvailable: true, systemPowerIsEstimated: false,
             adapterWatts: 65, adapterProtocol: "USB-PD"
@@ -178,5 +178,112 @@ import Testing
         #expect(sampler.lastUpdateTime == t4)
         #expect(sampler.loadMetric.readAt == t4)
         #expect(sampler.batteryPowerMetric.readAt == t4)
+    }
+
+    @Test func liveWattDisplayUsesPointOneWattDeadbandAndPreservesTrueZero() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SamplerWattDeadband-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sampler = PowerSampler(dataStore: DataStore(directory: directory))
+
+        sampler.publishBaseTelemetry(reading(at: t0, systemPower: 13.1, batteryPower: 12.1, inputPower: 25.1))
+        #expect(sampler.currentWattage == 13.1)
+        #expect(sampler.currentBatteryPower == 12.1)
+        #expect(sampler.currentAdapterInputPower == 25.1)
+
+        // Sub-0.1W jitter (0.09W) is gated out from @Observable live display properties
+        sampler.publishBaseTelemetry(
+            reading(at: t0.addingTimeInterval(5), systemPower: 13.19, batteryPower: 12.19, inputPower: 25.19)
+        )
+        #expect(sampler.currentWattage == 13.1)
+        #expect(sampler.currentBatteryPower == 12.1)
+        #expect(sampler.currentAdapterInputPower == 25.1)
+
+        // Exact 0.1W change (including IEEE 754 binary64 rounding pairs) publishes immediately
+        sampler.publishBaseTelemetry(
+            reading(at: t0.addingTimeInterval(10), systemPower: 13.2, batteryPower: 12.2, inputPower: 25.2)
+        )
+        #expect(sampler.currentWattage == 13.2)
+        #expect(sampler.currentBatteryPower == 12.2)
+        #expect(sampler.currentAdapterInputPower == 25.2)
+
+        // Small change to exact true zero (e.g. 0.04W -> 0.0W) still publishes
+        sampler.publishBaseTelemetry(
+            reading(at: t0.addingTimeInterval(15), systemPower: 0.04, batteryPower: 0.04, inputPower: 0.04)
+        )
+        #expect(sampler.currentWattage == 0.04)
+        #expect(sampler.currentBatteryPower == 0.04)
+        #expect(sampler.currentAdapterInputPower == 0.04)
+        sampler.publishBaseTelemetry(
+            reading(at: t0.addingTimeInterval(20), systemPower: 0, batteryPower: 0, inputPower: 0)
+        )
+        #expect(sampler.currentWattage == 0)
+        #expect(sampler.currentBatteryPower == 0)
+        #expect(sampler.currentAdapterInputPower == 0)
+    }
+
+    @Test func onDemandComponentPowerGatingRequiresVisibleMainWindowAndPowerPage() throws {
+        var demand = LiveReadingDemand()
+        #expect(!demand.isVisible(.mainWindow))
+        #expect(!demand.isVisible(.statusPopover))
+        demand.set(.statusPopover, visible: true)
+        #expect(demand.hasVisibleSurface)
+        #expect(demand.isVisible(.statusPopover))
+        #expect(!demand.isVisible(.mainWindow))
+        demand.set(.mainWindow, visible: true)
+        #expect(demand.isVisible(.mainWindow))
+        demand.set(.mainWindow, visible: false)
+        #expect(!demand.isVisible(.mainWindow))
+        #expect(demand.isVisible(.statusPopover))
+
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("SamplerPowerPageGate-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let sampler = PowerSampler(dataStore: DataStore(directory: directory))
+        #expect(!sampler.isComponentPowerDemandActive)
+        #expect(!sampler.isComponentPowerPollingActive)
+
+        // Menu bar popover alone never activates component power demand
+        sampler.setReadingSurface(.statusPopover, visible: true)
+        #expect(sampler.isForegroundReadingActive)
+        #expect(!sampler.isComponentPowerDemandActive)
+        #expect(!sampler.isComponentPowerPollingActive)
+
+        // Power page flag without visible main window stays inactive
+        sampler.setPowerPageVisible(true)
+        #expect(!sampler.isComponentPowerDemandActive)
+        #expect(!sampler.isComponentPowerPollingActive)
+
+        // Main window visible + Power page active enables demand
+        sampler.setReadingSurface(.mainWindow, visible: true)
+        #expect(sampler.isComponentPowerDemandActive)
+        #expect(ComponentReadingGate.shouldApply(
+            helperEnabled: true,
+            lifecycleState: .enabled,
+            isStarted: true,
+            isPowerPageVisible: sampler.isComponentPowerDemandActive
+        ))
+        // Without start(), no timer or XPC is started
+        #expect(!sampler.isComponentPowerPollingActive)
+
+        // Closing or minimizing main window disables demand even while Power page stays selected and popover stays open
+        sampler.setReadingSurface(.mainWindow, visible: false)
+        #expect(!sampler.isComponentPowerDemandActive)
+        #expect(!ComponentReadingGate.shouldApply(
+            helperEnabled: true,
+            lifecycleState: .enabled,
+            isStarted: true,
+            isPowerPageVisible: sampler.isComponentPowerDemandActive
+        ))
+
+        // Re-opening main window while still on Power page restores demand
+        sampler.setReadingSurface(.mainWindow, visible: true)
+        #expect(sampler.isComponentPowerDemandActive)
+
+        // Navigating away from Power page disables demand while main window stays open
+        sampler.setPowerPageVisible(false)
+        #expect(!sampler.isComponentPowerDemandActive)
+        #expect(sampler.isForegroundReadingActive)
+        #expect(!sampler.isComponentPowerPollingActive)
     }
 }

@@ -330,4 +330,44 @@ import Testing
         #expect(controller.installedState == .notInstalled)
         #expect(controller.lastErrorMessage?.isEmpty == false)
     }
+
+    @Test("功耗页不可见时拒绝分项读数回写与轮询，可见时放行")
+    func componentReadingGateRequiresVisiblePowerPage() {
+        #expect(ComponentReadingGate.shouldApply(
+            helperEnabled: true,
+            lifecycleState: .enabled,
+            isStarted: true,
+            isPowerPageVisible: false
+        ) == false)
+        #expect(ComponentReadingGate.shouldApply(
+            helperEnabled: true,
+            lifecycleState: .enabled,
+            isStarted: true,
+            isPowerPageVisible: true
+        ) == true)
+        // 默认参数保持向后兼容（等价于 isPowerPageVisible: true）
+        #expect(ComponentReadingGate.shouldApply(
+            helperEnabled: true,
+            lifecycleState: .enabled,
+            isStarted: true
+        ) == true)
+        #expect(ComponentReadingGate.shouldApply(
+            helperEnabled: false,
+            lifecycleState: .enabled,
+            isStarted: true,
+            isPowerPageVisible: true
+        ) == false)
+        #expect(ComponentReadingGate.shouldApply(
+            helperEnabled: true,
+            lifecycleState: .disabled,
+            isStarted: true,
+            isPowerPageVisible: true
+        ) == false)
+        #expect(ComponentReadingGate.shouldApply(
+            helperEnabled: true,
+            lifecycleState: .enabled,
+            isStarted: false,
+            isPowerPageVisible: true
+        ) == false)
+    }
 }

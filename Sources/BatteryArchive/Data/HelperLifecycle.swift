@@ -192,14 +192,15 @@ final class HelperLifecycleController {
     }
 }
 
-/// 分项读数回写门控（纯函数）：disable/stop 后迟到的异步/XPC 结果不得重新写回读数。
+/// 分项读数回写门控（纯函数）：disable/stop/离开功耗页后迟到的异步/XPC 结果不得重新写回读数。
 enum ComponentReadingGate {
     static func shouldApply(
         helperEnabled: Bool,
         lifecycleState: HelperLifecycleState,
-        isStarted: Bool
+        isStarted: Bool,
+        isPowerPageVisible: Bool = true
     ) -> Bool {
-        guard helperEnabled, isStarted else { return false }
+        guard helperEnabled, isStarted, isPowerPageVisible else { return false }
         if case .enabled = lifecycleState { return true }
         return false
     }

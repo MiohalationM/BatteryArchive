@@ -50,7 +50,6 @@ extension ProductPageHeader where Accessory == EmptyView {
 }
 
 struct ProductMetric: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let title: String
     let value: String
     var unit = ""
@@ -75,8 +74,6 @@ struct ProductMetric: View {
                     .foregroundStyle(Color.bbInk)
                     .lineLimit(1)
                     .minimumScaleFactor(0.72)
-                    .contentTransition(.numericText())
-                    .animation(reduceMotion ? nil : ProductMotion.reading, value: value)
                 if !unit.isEmpty && value != "—" {
                     Text(unit)
                         .font(BBType.captionMedium)

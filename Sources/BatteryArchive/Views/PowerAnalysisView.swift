@@ -501,8 +501,6 @@ private struct PowerLoadHero: View {
                     Text(formattedLoad)
                         .font(BBType.heroNumber().monospacedDigit())
                         .foregroundStyle(Color.bbInk)
-                        .contentTransition(.numericText())
-                        .animation(reduceMotion ? nil : ProductMotion.reading, value: formattedLoad)
                     Text("W")
                         .font(.system(size: 16, weight: .semibold, design: .rounded))
                         .foregroundStyle(.secondary)
@@ -607,17 +605,22 @@ private struct ComponentBreakdownCard: View {
             }
 
             if sampler.helperEnabled {
+                let now = Date()
+                let age = now.timeIntervalSince(sampler.lastComponentPowerAt)
+                let sampleFresh = age >= -2 && age <= Self.freshnessLimit
+                let isStale = age > Self.freshnessLimit
+
                 VStack(spacing: 11) {
-                    componentBar(label: "CPU", value: sampler.cpuPower, icon: "cpu", color: .bbBlue, measured: sampler.cpuPowerAvailable)
-                    componentBar(label: "GPU", value: sampler.gpuPower, icon: "square.stack.3d.up", color: .bbIce, measured: sampler.gpuPowerAvailable)
+                    componentBar(label: "CPU", value: sampler.cpuPower, icon: "cpu", color: .bbBlue, measured: sampler.cpuPowerAvailable, sampleFresh: sampleFresh)
+                    componentBar(label: "GPU", value: sampler.gpuPower, icon: "square.stack.3d.up", color: .bbIce, measured: sampler.gpuPowerAvailable, sampleFresh: sampleFresh)
                     if sampler.dramPowerAvailable {
-                        componentBar(label: "内存", value: sampler.dramPower, icon: "memorychip", color: .bbTeal, measured: sampler.dramPowerAvailable)
+                        componentBar(label: "内存", value: sampler.dramPower, icon: "memorychip", color: .bbTeal, measured: sampler.dramPowerAvailable, sampleFresh: sampleFresh)
                     }
                 }
                 .productWell(tint: .bbBlue, padding: 12)
                 .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .top)))
 
-                stalenessNote
+                stalenessNote(isStale: isStale)
 
                 HStack(spacing: 5) {
                     Image(systemName: "info.circle").font(.system(size: 10.5))
@@ -647,8 +650,8 @@ private struct ComponentBreakdownCard: View {
     }
 
     @ViewBuilder
-    private var stalenessNote: some View {
-        if Date().timeIntervalSince(sampler.lastComponentPowerAt) > Self.freshnessLimit {
+    private func stalenessNote(isStale: Bool) -> some View {
+        if isStale {
             StatusPillBadge(
                 text: sampler.componentPowerError ?? "正在等待分项数据更新…",
                 systemImage: "clock.badge.exclamationmark",
@@ -657,19 +660,24 @@ private struct ComponentBreakdownCard: View {
         }
     }
 
-    private func componentBar(label: String, value: Double, icon: String, color: Color, measured: Bool) -> some View {
+    private func componentBar(
+        label: String,
+        value: Double,
+        icon: String,
+        color: Color,
+        measured: Bool,
+        sampleFresh: Bool
+    ) -> some View {
         let total = sampler.currentWattage
-        let age = Date().timeIntervalSince(sampler.lastComponentPowerAt)
-        let sampleFresh = age >= -2 && age <= Self.freshnessLimit
         let percentVisible = measured && sampler.currentPowerAvailable && !sampler.currentPowerIsEstimated
             && sampleFresh
-        let percentage = percentVisible && total > 0 ? min(100, value / total * 100) : 0
-        let fillFraction = percentVisible ? percentage / 100 : 0
+        let roundedPercent = percentVisible && total > 0 ? Int(min(100, value / total * 100).rounded()) : 0
+        let fillFraction = Double(roundedPercent) / 100.0
         let readoutText = !sampleFresh
             ? "等待读数"
             : (!measured
                 ? "—"
-                : (percentVisible ? String(format: "%.1f W · %.0f%%", value, percentage) : String(format: "%.1f W", value)))
+                : (percentVisible ? String(format: "%.1f W · %d%%", value, roundedPercent) : String(format: "%.1f W", value)))
 
         return HStack(spacing: 10) {
             HStack(spacing: 6) {
@@ -689,7 +697,6 @@ private struct ComponentBreakdownCard: View {
                     Capsule()
                         .fill(LinearGradient(colors: [color, .bbHaloCyan], startPoint: .leading, endPoint: .trailing))
                         .frame(width: geo.size.width * fillFraction)
-                        .animation(reduceMotion ? nil : ProductMotion.reading, value: fillFraction)
                 }
             }
             .frame(height: 8)
@@ -697,8 +704,6 @@ private struct ComponentBreakdownCard: View {
             Text(readoutText)
                 .font(.system(size: 11.5, weight: .semibold, design: .rounded).monospacedDigit())
                 .foregroundStyle(sampleFresh && measured ? Color.bbInk : .secondary)
-                .contentTransition(.numericText())
-                .animation(reduceMotion ? nil : ProductMotion.reading, value: readoutText)
                 .frame(minWidth: 96, alignment: .trailing)
         }
     }
@@ -900,7 +905,7 @@ struct AdvancedSamplingCard: View {
                 .transition(reduceMotion ? .identity : .opacity.combined(with: .move(edge: .top)))
             }
 
-            Text("开启后每 10 秒采样 CPU / GPU / 内存分项功耗（首次需管理员授权）；关闭后不运行后台服务，基础电量与记录照常工作。")
+            Text("开启后，查看「功耗」页时每 10 秒采样 CPU / GPU / 内存分项功耗（首次需管理员授权）；离开功耗页或关闭窗口后自动暂停，后台服务空闲后自动退出。")
                 .font(BBType.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -989,7 +994,7 @@ struct AdvancedSamplingCard: View {
         case .disabled: "未开启 · 基础监控照常运行"
         case .starting: "正在准备后台服务…"
         case .removing: "正在移除后台服务…"
-        case .enabled: "已开启 · 每 10 秒更新分项估算"
+        case .enabled: "已开启 · 查看功耗页时按需采样"
         case .needsUpdate: "后台服务需要更新，开启时将自动升级"
         case .error: "上次启动未成功，可点击重试"
         }

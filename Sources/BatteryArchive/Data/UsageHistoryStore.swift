@@ -63,35 +63,37 @@ final class UsageHistoryStore {
             if !FileManager.default.fileExists(atPath: journalURL.path) {
                 try Data().write(to: journalURL, options: .atomic)
             }
-            let handle = try FileHandle(forWritingTo: journalURL)
-            defer { try? handle.close() }
-            var offset = try handle.seekToEnd()
-            if needsSeparator {
-                try handle.write(contentsOf: Data([0x0A]))
-                offset += 1
-                needsSeparator = false
-            }
             var rejectedOverlap = false
-            for bucket in buckets {
-                guard bucket.isValid,
-                      bucket.end > now.addingTimeInterval(-Self.retention),
-                      bucket.start <= now.addingTimeInterval(300),
-                      !ids.contains(bucket.id) else { continue }
-                // No double counting overlapping intervals, including after a wall
-                // clock correction. A later nonoverlapping bucket can recover.
-                if let last = entries.last, bucket.start < last.end {
-                    rejectedOverlap = true
-                    continue
+            do {
+                let handle = try FileHandle(forWritingTo: journalURL)
+                defer { try? handle.close() }
+                var offset = try handle.seekToEnd()
+                if needsSeparator {
+                    try handle.write(contentsOf: Data([0x0A]))
+                    offset += 1
+                    needsSeparator = false
                 }
-                let line = try encoder.encode(bucket)
-                var terminated = line
-                terminated.append(0x0A)
-                try handle.write(contentsOf: terminated)
-                entries.append(Entry(id: bucket.id, start: bucket.start, end: bucket.end,
-                                     timeZoneID: bucket.timeZoneID, offset: offset, length: line.count))
-                ids.insert(bucket.id)
-                offset += UInt64(terminated.count)
-                dailyStore.include(bucket, allowRecovery: bucket.end > now.addingTimeInterval(-Self.retention))
+                for bucket in buckets {
+                    guard bucket.isValid,
+                          bucket.end > now.addingTimeInterval(-Self.retention),
+                          bucket.start <= now.addingTimeInterval(300),
+                          !ids.contains(bucket.id) else { continue }
+                    // No double counting overlapping intervals, including after a wall
+                    // clock correction. A later nonoverlapping bucket can recover.
+                    if let last = entries.last, bucket.start < last.end {
+                        rejectedOverlap = true
+                        continue
+                    }
+                    let line = try encoder.encode(bucket)
+                    var terminated = line
+                    terminated.append(0x0A)
+                    try handle.write(contentsOf: terminated)
+                    entries.append(Entry(id: bucket.id, start: bucket.start, end: bucket.end,
+                                         timeZoneID: bucket.timeZoneID, offset: offset, length: line.count))
+                    ids.insert(bucket.id)
+                    offset += UInt64(terminated.count)
+                    dailyStore.include(bucket, allowRecovery: bucket.end > now.addingTimeInterval(-Self.retention))
+                }
             }
             // 先维持 30 天 / 10,000 桶内存索引上限，即使日汇总目录不可读也不能跳过裁剪（物理 compact 仍受 canDiscardDetailedHistory 门控）。
             prune(now: now)
@@ -208,23 +210,66 @@ final class UsageHistoryStore {
     }
 
     private func compact() throws {
-        let handle = try FileHandle(forReadingFrom: journalURL)
-        defer { try? handle.close() }
-        var result = Data()
-        var updated: [Entry] = []
-        for var entry in entries {
-            try autoreleasepool {
-                try handle.seek(toOffset: entry.offset)
-                guard let line = try handle.read(upToCount: entry.length), line.count == entry.length else {
-                    throw CocoaError(.fileReadCorruptFile)
-                }
-                entry.offset = UInt64(result.count)
-                result.append(line)
-                result.append(0x0A)
-                updated.append(entry)
+        let directory = journalURL.deletingLastPathComponent()
+        let tempURL = directory.appendingPathComponent(".\(journalURL.lastPathComponent).compact-\(UUID().uuidString).tmp")
+        var tempExists = false
+        defer {
+            if tempExists {
+                try? FileManager.default.removeItem(at: tempURL)
             }
         }
-        try result.write(to: journalURL, options: .atomic)
+
+        guard FileManager.default.createFile(atPath: tempURL.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown)
+        }
+        tempExists = true
+
+        var updated: [Entry] = []
+        updated.reserveCapacity(entries.count)
+        let chunkLimit = 65_536
+
+        do {
+            let readHandle = try FileHandle(forReadingFrom: journalURL)
+            defer { try? readHandle.close() }
+            let writeHandle = try FileHandle(forWritingTo: tempURL)
+            var writeClosed = false
+            defer {
+                if !writeClosed {
+                    try? writeHandle.close()
+                }
+            }
+
+            var buffer = Data(capacity: chunkLimit)
+            var nextOffset: UInt64 = 0
+
+            for var entry in entries {
+                try autoreleasepool {
+                    try readHandle.seek(toOffset: entry.offset)
+                    guard let line = try readHandle.read(upToCount: entry.length), line.count == entry.length else {
+                        throw CocoaError(.fileReadCorruptFile)
+                    }
+                    entry.offset = nextOffset
+                    nextOffset += UInt64(line.count + 1)
+                    buffer.append(line)
+                    buffer.append(0x0A)
+                    updated.append(entry)
+                    if buffer.count >= chunkLimit {
+                        try writeHandle.write(contentsOf: buffer)
+                        buffer.removeAll(keepingCapacity: true)
+                    }
+                }
+            }
+            if !buffer.isEmpty {
+                try writeHandle.write(contentsOf: buffer)
+                buffer.removeAll(keepingCapacity: false)
+            }
+            try writeHandle.synchronize()
+            try writeHandle.close()
+            writeClosed = true
+        }
+
+        _ = try FileManager.default.replaceItemAt(journalURL, withItemAt: tempURL)
+        tempExists = false
         entries = updated
         expiredLines = 0
         needsSeparator = false

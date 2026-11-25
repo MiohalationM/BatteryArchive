@@ -271,6 +271,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.clearMainWindowObservers()
+                self.sampler.setPowerPageVisible(false)
                 self.sampler.setReadingSurface(.mainWindow, visible: false)
                 window?.contentViewController = nil
                 if self.mainWindow === window {
@@ -285,6 +286,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                self.sampler.setPowerPageVisible(false)
                 self.sampler.setReadingSurface(.mainWindow, visible: false)
                 self.releaseIdleUICachesAndReclaimMemory()
             }
@@ -296,6 +298,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
                 guard let self else { return }
                 self.cancelPendingMemoryReclaim()
                 self.sampler.setReadingSurface(.mainWindow, visible: true)
+                self.sampler.setPowerPageVisible(self.navigation.section == .energy)
                 self.refreshUsageReport()
             }
         })
@@ -307,6 +310,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
         NSApp.activate(ignoringOtherApps: true)
         sampler.start()
         sampler.setReadingSurface(.mainWindow, visible: true)
+        sampler.setPowerPageVisible(navigation.section == .energy)
         refreshUsageReport()
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)

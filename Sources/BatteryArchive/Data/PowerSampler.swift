@@ -167,6 +167,7 @@ final class PowerSampler {
     @ObservationIgnored private var isSleeping: Bool = false
     @ObservationIgnored private var areScreensSleeping: Bool = false
     @ObservationIgnored private var isStarted: Bool = false
+    @ObservationIgnored private var isPowerPageVisible: Bool = false
     @ObservationIgnored private var chargeCompletionTracker = ChargeCompletionTracker()
     @ObservationIgnored private var estimateStateSince = Date()
     /// 高级采样开关持久化键
@@ -424,6 +425,7 @@ final class PowerSampler {
 
     /// 登记主窗口 / 菜单栏弹窗的可见性。任一界面打开即立即采样并切到前台节奏；
     /// 只有最后一个界面关闭后才回到后台低频，避免两个界面互相覆盖生命周期。
+    /// 主窗口隐藏/最小化时同步停止按需分项采样；仅打开菜单栏弹窗绝不启动 Helper 轮询。
     func setReadingSurface(_ surface: LiveReadingSurface, visible: Bool) {
         let oldInterval = effectiveRefreshInterval
         guard liveReadingDemand.set(surface, visible: visible) else { return }
@@ -434,6 +436,15 @@ final class PowerSampler {
         }
         if active {
             flushPendingBackgroundReadTimestamps()
+        }
+        if surface == .mainWindow {
+            if visible {
+                if shouldPollComponentPower {
+                    restartComponentPowerTimer(sampleImmediately: true)
+                }
+            } else {
+                stopComponentPowerTimer()
+            }
         }
         let newInterval = effectiveRefreshInterval
 
@@ -447,6 +458,43 @@ final class PowerSampler {
         if oldInterval != newInterval {
             restartTimer(sampleImmediately: false)
         }
+    }
+
+    /// 登记「功耗」页是否处于当前主窗口活跃页面。
+    /// 仅当主窗口可见且停留在功耗页、未休眠/未息屏时才轮询 Helper；
+    /// 离开功耗页立即停表并取消在途 XPC，让 Helper 60 秒后自然空闲退出以停止 powermetrics。
+    func setPowerPageVisible(_ visible: Bool) {
+        guard visible != isPowerPageVisible else { return }
+        isPowerPageVisible = visible
+        if visible {
+            if shouldPollComponentPower {
+                restartComponentPowerTimer(sampleImmediately: true)
+            }
+        } else {
+            stopComponentPowerTimer()
+        }
+    }
+
+    /// 当前界面与睡眠状态是否满足按需分项采样条件（不含 Helper 开关与生命周期状态）。
+    var isComponentPowerDemandActive: Bool {
+        isPowerPageVisible
+            && liveReadingDemand.isVisible(.mainWindow)
+            && !isSleeping
+            && !areScreensSleeping
+    }
+
+    /// 供诊断与测试观测分项采样定时器是否处于运行态。
+    var isComponentPowerPollingActive: Bool {
+        componentPowerTimer != nil
+    }
+
+    private var shouldPollComponentPower: Bool {
+        ComponentReadingGate.shouldApply(
+            helperEnabled: helperEnabled,
+            lifecycleState: helperLifecycle.state,
+            isStarted: isStarted,
+            isPowerPageVisible: isComponentPowerDemandActive
+        )
     }
 
     private var effectiveRefreshInterval: TimeInterval {
@@ -476,11 +524,12 @@ final class PowerSampler {
         dispatchTimer = timer
     }
 
-    /// 高级分项采样独立于基础读数和界面可见性。用户主动开启后，Helper 与 App
-    /// 均按 10 秒节奏产出/读取缓存，给每分钟历史点提供真实的新鲜分项样本；默认关闭。
+    /// 按需高级分项采样：仅在用户开启 Helper、服务处于 enabled、主窗口可见且停留在「功耗」页、
+    /// 且系统/屏幕未休眠时按 10 秒节奏向 Helper 拉取 CPU/GPU/DRAM 读数；
+    /// 其余时间停止轮询，让 Helper 60 秒空闲自退出从而释放 powermetrics CPU 占用。
     private func restartComponentPowerTimer(sampleImmediately: Bool) {
         stopComponentPowerTimer()
-        guard isStarted, helperEnabled else { return }
+        guard shouldPollComponentPower else { return }
         if sampleImmediately { sampleComponentPower() }
 
         let timer = DispatchSource.makeTimerSource(queue: .main)
@@ -508,12 +557,8 @@ final class PowerSampler {
     }
 
     private func sampleComponentPower() {
-        // 开关与生命周期双门控；关闭/未开启时绝不发起 XPC。
-        guard ComponentReadingGate.shouldApply(
-            helperEnabled: helperEnabled,
-            lifecycleState: helperLifecycle.state,
-            isStarted: isStarted
-        ), !isComponentPowerSampleInFlight else { return }
+        // 开关、生命周期、主窗口功耗页可见性与唤醒态多重门控；不满足条件时绝不发起 XPC。
+        guard shouldPollComponentPower, !isComponentPowerSampleInFlight else { return }
         isComponentPowerSampleInFlight = true
         let generation = componentGeneration
         componentTask = Task { @MainActor [weak self] in
@@ -526,9 +571,7 @@ final class PowerSampler {
             do {
                 let component = try await self.helperClient.readComponentPower()
                 guard generation == self.componentGeneration, !Task.isCancelled,
-                      ComponentReadingGate.shouldApply(helperEnabled: self.helperEnabled,
-                                                       lifecycleState: self.helperLifecycle.state,
-                                                       isStarted: self.isStarted) else { return }
+                      self.shouldPollComponentPower else { return }
                 let age = Date().timeIntervalSince(component.receivedAt)
                 guard age >= -2, age <= 30 else { self.clearComponentReadings(); return }
                 if self.componentPowerError != nil { self.componentPowerError = nil }
@@ -542,11 +585,12 @@ final class PowerSampler {
                 if self.cpuPowerAvailable != cpuAvail { self.cpuPowerAvailable = cpuAvail }
                 if self.gpuPowerAvailable != gpuAvail { self.gpuPowerAvailable = gpuAvail }
                 if self.dramPowerAvailable != dramAvail { self.dramPowerAvailable = dramAvail }
-                if abs(self.cpuPower - cpuVal) > 0.05 || (cpuVal == 0 && self.cpuPower != 0) { self.cpuPower = cpuVal }
-                if abs(self.gpuPower - gpuVal) > 0.05 || (gpuVal == 0 && self.gpuPower != 0) { self.gpuPower = gpuVal }
-                if abs(self.dramPower - dramVal) > 0.05 || (dramVal == 0 && self.dramPower != 0) { self.dramPower = dramVal }
+                if abs(self.cpuPower - cpuVal) >= 0.1 - 1e-9 || (cpuVal == 0 && self.cpuPower != 0) { self.cpuPower = cpuVal }
+                if abs(self.gpuPower - gpuVal) >= 0.1 - 1e-9 || (gpuVal == 0 && self.gpuPower != 0) { self.gpuPower = gpuVal }
+                if abs(self.dramPower - dramVal) >= 0.1 - 1e-9 || (dramVal == 0 && self.dramPower != 0) { self.dramPower = dramVal }
             } catch {
-                guard generation == self.componentGeneration, !Task.isCancelled else { return }
+                guard generation == self.componentGeneration, !Task.isCancelled,
+                      self.shouldPollComponentPower else { return }
                 self.clearComponentReadings(clearError: false)
                 if self.componentPowerError != error.localizedDescription {
                     self.componentPowerError = error.localizedDescription
@@ -565,6 +609,7 @@ final class PowerSampler {
         invalidateChargingObservationContinuity(at: now)
         isSleeping = true
         areScreensSleeping = true
+        stopComponentPowerTimer()
         usageAggregator.sleep(at: now, monotonicTime: monotonic)
         publishUsage(at: now, force: true)
         // 睡眠期间连续量立即截断，不得把睡前功率延伸进睡眠窗口
@@ -575,6 +620,7 @@ final class PowerSampler {
     private func handleScreensSleep() {
         guard isStarted else { return }
         areScreensSleeping = true
+        stopComponentPowerTimer()
         let now = Date()
         usageScreenOn = false
         usageAggregator.changeScreen(on: false, at: now, monotonicTime: ProcessInfo.processInfo.systemUptime)
@@ -590,6 +636,9 @@ final class PowerSampler {
         usageAggregator.changeScreen(on: true, at: now, monotonicTime: ProcessInfo.processInfo.systemUptime)
         publishUsage(at: now, force: true)
         sampleUI()
+        if shouldPollComponentPower {
+            restartComponentPowerTimer(sampleImmediately: true)
+        }
     }
 
     private func handleWake() {
@@ -609,6 +658,9 @@ final class PowerSampler {
             sampleUI()
             chargePolicyMonitor.refreshIfNeeded(force: true)
             refreshSystemHealthInBackground()
+            if shouldPollComponentPower {
+                restartComponentPowerTimer(sampleImmediately: true)
+            }
         }
     }
 
@@ -684,18 +736,18 @@ final class PowerSampler {
         if known != currentSourceKnown { currentSourceKnown = known; publishedSemanticChange = true }
         // 只在值真正变化时写 @Observable 属性：Observation 虽是属性级失效，
         // 无条件写仍会让读取该属性的视图逐 tick 重算。
-        // 0.05W / 0.05°C 阈值滤掉遥测抖动；level/isCharging 等低频字段按相等门控。
+        // 0.1W / 0.05°C 阈值滤掉遥测抖动；level/isCharging 等低频字段按相等门控。
         let wattage = reading.trustedSystemLoad ?? 0
         let batteryPower = info?.batteryPower ?? 0
         let adapterInputPower = info?.adapterInputPower ?? 0
         if ps.level != currentLevel { currentLevel = ps.level; publishedSemanticChange = true }
         if known && ps.isCharging != currentIsCharging { currentIsCharging = ps.isCharging; publishedSemanticChange = true }
         if isPluggedIn != currentExternalConnected { currentExternalConnected = isPluggedIn; publishedSemanticChange = true }
-        if abs(wattage - currentWattage) > 0.05 || (wattage == 0 && currentWattage != 0) {
+        if abs(wattage - currentWattage) >= 0.1 - 1e-9 || (wattage == 0 && currentWattage != 0) {
             currentWattage = wattage
             publishedSemanticChange = true
         }
-        if abs(batteryPower - currentBatteryPower) > 0.05 || (batteryPower == 0 && currentBatteryPower != 0) {
+        if abs(batteryPower - currentBatteryPower) >= 0.1 - 1e-9 || (batteryPower == 0 && currentBatteryPower != 0) {
             currentBatteryPower = batteryPower
             publishedSemanticChange = true
         }
@@ -714,7 +766,7 @@ final class PowerSampler {
         }
         if (info?.voltage ?? 0) != currentVoltage { currentVoltage = info?.voltage ?? 0; publishedSemanticChange = true }
         if (info?.instantAmperage ?? 0) != currentAmperage { currentAmperage = info?.instantAmperage ?? 0; publishedSemanticChange = true }
-        if abs(adapterInputPower - currentAdapterInputPower) > 0.05
+        if abs(adapterInputPower - currentAdapterInputPower) >= 0.1 - 1e-9
             || (adapterInputPower == 0 && currentAdapterInputPower != 0)
         {
             currentAdapterInputPower = adapterInputPower

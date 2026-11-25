@@ -344,6 +344,57 @@ import Testing
         #expect(try String(contentsOf: url, encoding: .utf8).split(separator: "\n").count == 1)
     }
 
+    @Test func streamingCompactionPreservesMultiChunkEntriesAcrossReloadAndLeavesNoTempFiles() throws {
+        let dir = try directory()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let url = dir.appendingPathComponent("usage-history.jsonl")
+        let encoder = JSONEncoder()
+        var seed = Data()
+        for index in 0..<65 {
+            seed.append(try encoder.encode(bucket(at: now.addingTimeInterval(-31 * 86_400 + Double(index) * 60))))
+            seed.append(0x0A)
+        }
+        try seed.write(to: url)
+
+        let store = UsageHistoryStore(directory: dir, now: now)
+        let retained = (0..<300).map { index in
+            bucket(at: now.addingTimeInterval(-Double(302 - index) * 60))
+        }
+        store.append(retained, now: now)
+        #expect(store.lastError == nil)
+
+        // Verify payload crossed the 64 KiB streaming chunk limit so multi-chunk flushing was exercised.
+        let compactedSize = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.intValue ?? 0
+        #expect(compactedSize > 65_536)
+
+        let interval = DateInterval(start: now.addingTimeInterval(-305 * 60), end: now)
+        let inMemoryPage = store.read(in: interval, now: now)
+        #expect(inMemoryPage.error == nil)
+        #expect(inMemoryPage.skippedLines == 0)
+        #expect(inMemoryPage.buckets == retained)
+
+        // No hidden .compact-*.tmp staging files may remain in the store directory.
+        let directoryItems = try FileManager.default.contentsOfDirectory(
+            at: dir,
+            includingPropertiesForKeys: nil,
+            options: []
+        ).map(\.lastPathComponent)
+        #expect(directoryItems.filter { $0.contains(".compact-") || $0.hasSuffix(".tmp") }.isEmpty)
+
+        // Re-opening from disk reads every compacted entry identically and subsequent appends succeed cleanly.
+        let reopened = UsageHistoryStore(directory: dir, now: now)
+        let reloadedPage = reopened.read(in: interval, now: now)
+        #expect(reloadedPage.error == nil)
+        #expect(reloadedPage.skippedLines == 0)
+        #expect(reloadedPage.buckets == retained)
+
+        let extra = bucket(at: now.addingTimeInterval(-60))
+        reopened.append([extra], now: now)
+        #expect(reopened.lastError == nil)
+        let afterAppend = UsageHistoryStore(directory: dir, now: now).read(in: interval, now: now)
+        #expect(afterAppend.buckets == retained + [extra])
+    }
+
     @Test func corruptCheckpointPreservesExpiredJournalUntilRestartRecovery() throws {
         let dir = try directory()
         defer { try? FileManager.default.removeItem(at: dir) }

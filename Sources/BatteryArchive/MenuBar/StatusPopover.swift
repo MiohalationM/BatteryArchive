@@ -303,7 +303,7 @@ struct StatusPopover: View {
     }
 }
 
-/// 弹窗内可悬停直达详情页的遥测行：平滑数值滚动 + 悬停微亮与轻推箭头。
+/// 弹窗内可悬停直达详情页的遥测行：悬停微亮与轻推箭头。
 private struct PopoverTelemetryRow: View {
     let icon: String
     let tint: Color
@@ -346,8 +346,6 @@ private struct PopoverTelemetryRow: View {
                 Text(value)
                     .font(.system(size: 13.5, weight: .semibold, design: .rounded).monospacedDigit())
                     .foregroundStyle(Color.bbInk)
-                    .contentTransition(.numericText())
-                    .animation(reduceMotion ? nil : ProductMotion.reading, value: value)
                 if !unit.isEmpty {
                     Text(unit)
                         .font(BBType.caption)

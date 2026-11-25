@@ -45,8 +45,6 @@ struct MainWindowView: View {
     @Environment(ProductNavigation.self) private var navigation
     @Environment(UsageReportModel.self) private var reports
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    /// 按需懒挂载：仅挂载已访问过的分区，关闭主窗口后随视图树一并释放，兼顾低内存与切页顺滑。
-    @State private var mountedSections: Set<ProductSection> = []
 
     var body: some View {
         HStack(spacing: 0) {
@@ -56,25 +54,12 @@ struct MainWindowView: View {
                 SidebarBatteryStatus()
             }
 
+            // 仅渲染当前激活分区：切页时立即释放隐藏页面的图表与渲染缓存，避免长期驻留内存。
             ZStack(alignment: .topLeading) {
-                ForEach(ProductSection.allCases) { section in
-                    let isActive = navigation.section == section
-                    if mountedSections.contains(section) || isActive {
-                        // 纯 GPU 图层位移 + 轻缩放 + 淡入淡出：方向与侧栏上下点击一致，已访问分区来回切换零布局重算、120fps 顺滑。
-                        let directionalOffsetY: CGFloat = {
-                            guard !reduceMotion, !isActive else { return 0 }
-                            return section.rawValue < navigation.section.rawValue ? -10 : 10
-                        }()
-                        sectionView(for: section)
-                            .environment(\.isSectionActive, isActive && sampler.isForegroundReadingActive)
-                            .opacity(isActive ? 1 : 0)
-                            .offset(y: directionalOffsetY)
-                            .scaleEffect(isActive || reduceMotion ? 1.0 : 0.994, anchor: .center)
-                            .allowsHitTesting(isActive)
-                            .accessibilityHidden(!isActive)
-                            .zIndex(isActive ? 1 : 0)
-                    }
-                }
+                sectionView(for: navigation.section)
+                    .id(navigation.section)
+                    .environment(\.isSectionActive, sampler.isForegroundReadingActive)
+                    .transition(reduceMotion ? .identity : .opacity)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .clipped()
@@ -84,10 +69,13 @@ struct MainWindowView: View {
         .background { navigationShortcuts }
         .frame(minWidth: 840, minHeight: 580)
         .onAppear {
-            mountedSections.insert(navigation.section)
+            sampler.setPowerPageVisible(navigation.section == .energy)
         }
         .onChange(of: navigation.section) { _, newSection in
-            mountedSections.insert(newSection)
+            sampler.setPowerPageVisible(newSection == .energy)
+        }
+        .onDisappear {
+            sampler.setPowerPageVisible(false)
         }
         .onChange(of: reports.timeZoneID) {
             Task { await reports.refresh(live: sampler.liveUsageBuckets()) }

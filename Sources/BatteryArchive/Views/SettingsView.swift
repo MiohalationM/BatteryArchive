@@ -238,7 +238,7 @@ struct SettingsView: View {
                     cadenceRow(
                         "CPU / GPU / 内存分项",
                         value: sampler.helperEnabled
-                            ? "独立每 \(Int(SamplingCadence.componentPowerInterval)) 秒"
+                            ? "功耗页按需每 \(Int(SamplingCadence.componentPowerInterval)) 秒"
                             : "已关闭",
                         tint: sampler.helperEnabled ? .bbAmber : .secondary
                     )

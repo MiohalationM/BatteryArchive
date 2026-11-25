@@ -23,8 +23,6 @@ struct BatteryUsageView: View {
     @State private var showAllSessions = false
     @State private var hoveredDay: Date?
     @State private var dailyPlotLeadingInset: CGFloat = 52
-    @State private var mountedPrimary = false
-    @State private var mountedAlternate = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var dailySummaries: [UsageDailySummary] { reports.summaries }
@@ -106,37 +104,19 @@ struct BatteryUsageView: View {
 
             let isAlt = showHealth.wrappedValue
             ZStack(alignment: .topLeading) {
-                if mountedPrimary || !isAlt {
-                    historyContent
-                        .environment(\.isSectionActive, isSectionActive && !isAlt)
-                        .opacity(isAlt ? 0 : 1)
-                        .offset(x: isAlt && !reduceMotion ? -12 : 0)
-                        .scaleEffect(isAlt && !reduceMotion ? 0.994 : 1.0, anchor: .center)
-                        .allowsHitTesting(!isAlt)
-                        .accessibilityHidden(isAlt)
-                        .zIndex(isAlt ? 0 : 1)
-                }
-                if mountedAlternate || isAlt {
+                if isAlt {
                     BatteryHealthPanel()
-                        .environment(\.isSectionActive, isSectionActive && isAlt)
-                        .opacity(isAlt ? 1 : 0)
-                        .offset(x: !isAlt && !reduceMotion ? 12 : 0)
-                        .scaleEffect(!isAlt && !reduceMotion ? 0.994 : 1.0, anchor: .center)
-                        .allowsHitTesting(isAlt)
-                        .accessibilityHidden(!isAlt)
-                        .zIndex(isAlt ? 1 : 0)
+                        .environment(\.isSectionActive, isSectionActive)
+                        .transition(reduceMotion ? .identity : .opacity)
+                } else {
+                    historyContent
+                        .environment(\.isSectionActive, isSectionActive)
+                        .transition(reduceMotion ? .identity : .opacity)
                 }
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             .clipped()
             .animation(reduceMotion ? nil : ProductMotion.page, value: isAlt)
-        }
-        .onAppear {
-            if showHealth.wrappedValue { mountedAlternate = true }
-            else { mountedPrimary = true }
-        }
-        .onChange(of: showHealth.wrappedValue) { _, isAlt in
-            if isAlt { mountedAlternate = true }
-            else { mountedPrimary = true }
         }
         .environment(\.calendar, calendar)
         .environment(\.timeZone, calendar.timeZone)

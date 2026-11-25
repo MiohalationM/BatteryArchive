@@ -37,6 +37,10 @@ struct LiveReadingDemand {
 
     var hasVisibleSurface: Bool { !surfaces.isEmpty }
 
+    func isVisible(_ surface: LiveReadingSurface) -> Bool {
+        surfaces.contains(surface)
+    }
+
     @discardableResult
     mutating func set(_ surface: LiveReadingSurface, visible: Bool) -> Bool {
         if visible {
